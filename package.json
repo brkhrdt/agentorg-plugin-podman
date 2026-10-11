@@ -1,0 +1,19 @@
+{
+  "name": "@agentorg/plugin-podman",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": { ".": "./src/index.ts" },
+  "scripts": {
+    "check": "tsc --noEmit",
+    "test": "bun test",
+    "build": "bun build src/index.ts --target=bun --outfile dist/index.js && bun build src/mcp.ts --compile --outfile dist/agentorg-podman-mcp && bun build src/entrypoint.ts --compile --outfile dist/agentorg-podman-exec",
+    "test:podman": "ORG_PODMAN_TEST=1 bun test tests/podman.test.ts"
+  },
+  "dependencies": { "zod": "^4.3.6", "@modelcontextprotocol/sdk": "1.32.1" },
+  "devDependencies": {
+    "agent-organization": "file:../agentorg",
+    "@agentclientprotocol/sdk": "1.7.0",
+    "@types/bun": "^1.3.10",
+    "typescript": "^5.9.3"
+  }
+}

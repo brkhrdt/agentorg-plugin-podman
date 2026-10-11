@@ -1,0 +1,5 @@
+node_modules/
+dist/
+examples/pi/agentorg-pi-acp
+examples/pi/agentorg-podman-mcp
+examples/pi/agentorg-podman-exec
