@@ -75,6 +75,8 @@ from the nearest explicit ancestor, falling back to the configured default.
   within a writable workspace. Nonrecursive binds do not expose host submounts.
 * There are **no implicit workspace or credential grants**, and grants are never
   automatically copied to children.
+* Named volumes are separate grants (`readOnlyVolumes` / `readWriteVolumes`), never
+  inferred from directories or cwd. See [Persistent harness volumes](#persistent-harness-volumes).
 * Trusted clients can grant an agent an external directory independently of its
   ancestors. That agent can subsequently delegate it to children. Client changes
   do not automatically propagate/revoke subtree grants.
@@ -94,9 +96,12 @@ read/write explicitly. Do not bake credentials into an image you distribute.
 
 ## Agent MCP tools and delegation
 
-`child_create` and `descendant_modify` gain top-level arrays `readOnlyDirs` and
-`readWriteDirs`. The two arrays replace the target's grants; an omitted array is
-empty when either array is supplied. No mounts are inferred from `cwd`.
+`child_create` and `descendant_modify` gain top-level arrays `readOnlyDirs`,
+`readWriteDirs`, `readOnlyVolumes` and `readWriteVolumes`. Each pair independently
+replaces that kind of grant; an omitted array is empty when its partner is supplied.
+No mounts are inferred from `cwd` or inherited from parents. Volume names use exact
+identity matching, with the same caller/direct-parent RO/RW delegation and dependent
+child revocation checks as directories. Only trusted clients can discover volumes.
 
 ```json
 {
@@ -126,7 +131,11 @@ bounds records, outstanding requests, connections, and output buffering.
 ## TUI and image propagation
 
 The TUI discovers `capabilities.plugins.podman` and adds `containerImage`,
-`readOnlyDirs` and `readWriteDirs` editor fields. Directory grants use a reusable
+`readOnlyDirs`, `readWriteDirs`, `readOnlyVolumes` and `readWriteVolumes` editor fields.
+Volumes use the same add/edit/remove list workflow, with server-discovered choices:
+text fuzzy-filters names, ↑/↓ selects, Tab completes, Enter stages and Escape cancels.
+Destinations/descriptions are displayed, never host storage paths. Discovery failures
+preserve drafts; arbitrary typed volume names cannot be staged through the picker. Directory grants use a reusable
 list editor with add/edit/remove, filtering and server-side cwd-like completion
 (↑/↓ select, Tab inserts/descends, Enter stages). They are still arrays in the API,
 not JSON prompts in the UI. Completion uses the parent/server startup base, never
@@ -184,6 +193,10 @@ export default createPodmanPlugin({
   network: "pasta", // or "slirp4netns" (must be installed), "none"
   containerUid: 1000,
   containerGid: 1000,
+  volumes: {
+    "agentorg-pi-config": { destination: "/home/pi/.pi", description: "Shared Pi credentials" },
+    // readOnly: true optionally restricts a volume to read-only grants.
+  },
 });
 ```
 
@@ -197,13 +210,90 @@ custom adapters can configure `harnessEnv`. Plugin-provided launch environment i
 also trusted. Optional `mcpExecutable`/`entrypointExecutable` configure image
 helper locations. No arbitrary Podman flags are accepted from agent settings.
 
+## Persistent harness volumes
+
+Create volumes as the **same rootless Podman user** that runs the server. The
+operator-owned `volumes` configuration above is the eligibility allowlist and
+trusted name-to-container-destination map; labels are not required. Defaults are
+empty. Only existing plain `local` volumes without driver options are supported
+(no host bind devices, NFS drivers or arbitrary storage plugins).
+
+```sh
+podman volume create agentorg-pi-config
+# Explicit, one-time snapshot; use a trusted local image with sh, cp and find:
+sh examples/seed-volume.sh agentorg-pi-config localhost/agentorg-pi:latest
+# Optional third argument selects a host directory other than ~/.pi.
+# CONTAINER_UID / CONTAINER_GID default to 1000; match the plugin/image user.
+```
+
+The helper copies contents including dotfiles, without printing credentials. It
+uses a temporary network-disabled container with a read-only host source and the
+configured UID/GID mapping; no credentials or source paths enter the image, build
+context or agent settings. It refuses nonempty uninitialized volumes and does
+nothing if already initialized. Partial copies remain uninitialized and require
+operator cleanup. It never automatically overwrites or synchronizes host changes.
+
+Grant the seeded volume via `agent.create` or `agent.modify`:
+
+```json
+{
+  "harness": "pi",
+  "cwd": "/tmp/project",
+  "extensions": {
+    "podman": {
+      "readWriteDirs": ["/tmp/project"],
+      "readOnlyVolumes": ["agentorg-pi-config"],
+      "readWriteVolumes": []
+    }
+  }
+}
+```
+
+For Codex/Claude or other harnesses, configure appropriate destinations such as
+`/home/pi/.codex` or `/home/pi/.claude`, matching the image user's HOME. A volume
+does not authorize cwd. Duplicate names, overlapping granted destinations,
+directory/volume overlaps, and protected helper/runtime/session destinations are
+rejected. The allowlist may offer alternative volumes at the same destination,
+but an agent may select only one. Empty arrays revoke access; supplying the entire
+Podman settings namespace replaces all grants as usual.
+
+**These stores are shared, persistent capabilities, not private session storage.**
+All agents granted a volume (and their in-container tools) can read its credentials.
+Read-only prevents writes, not disclosure. RW grants allow concurrent token refresh,
+configuration edits and other writes visible to every consumer; prefer RO whenever
+possible. Pi sessions still use AgentOrg's private per-agent session bind, even
+when `.pi` is shared. The plugin never deletes volumes on stop/removal or image changes.
+
+The client-only `podman.volumes` endpoint accepts `{}` and returns
+`{volumes: [{name, destination, description?, readOnly}]}` for eligible, existing,
+unchanged volumes. It exposes no contents, credentials or host mountpoints.
+Capabilities advertise it at `plugins.podman.endpoints.volumes`, and advertise both
+volume fields as generic `list` editors (the TUI uses specialized pickers without
+duplicating these descriptors).
+
+On the first grant the plugin records creation timestamp, root device/inode and
+trusted mapping/access policy in `<data-dir>/podman-volume-pins.json`. Recovery and
+every launch re-inspect through the configured Podman executable. The native
+startup gate checks volume root identity, exact mount destination and RO/RW mode
+before running any harness code. Later plugins cannot add, omit or alter mounts.
+**Rebuild images/helpers** to use volumes; old gates reject volume manifests.
+
+For credential rotation, stop all consumers and explicitly update the volume
+contents, or create/seed a new volume. To deliberately replace/redirect a pinned
+volume: stop the server and consumers, remove only that name's entry from the
+protected pin file, update trusted configuration if needed, restart the server,
+and re-save affected settings through a trusted client before launching them.
+Without this explicit reset, deletion/replacement/configuration changes fail closed.
+Removing an allowlist entry also blocks recovery. Deleting volumes is always a
+separate trusted operator action (`podman volume rm`), never an agent operation.
+
 ## Isolation and lifecycle
 
 Containers use private PID/IPC/mount namespaces, a non-root mapped user, dropped
 capabilities, no-new-privileges, and no privileged mode or Podman socket. Network
 is enabled by default for provider APIs. Each agent gets only its
 own session directory (an internal writable mount, not a delegable grant), its
-private relay socket, and explicitly granted workspace/configuration directories.
+private relay socket, and explicitly granted directories and named volumes.
 The image's own writable overlay and temporary files are not host workspace grants.
 
 A startup gate verifies the device/inode identity of every mounted directory and
@@ -239,7 +329,9 @@ bun run test:podman          # real rootless Podman; builds a temporary fixture 
 ORG_PODMAN_PI_IMAGE=localhost/agentorg-pi:latest bun test tests/pi-image.test.ts
 ```
 
-The real test verifies RO/RW enforcement, unmounted host files and sibling sessions,
+The real test verifies RO/RW enforcement for directories and volumes, shared volume
+contents and persistence after agent removal, idempotent credential-free image seeding,
+unmounted host files and sibling sessions,
 native MCP delegation, independent containers, removal, and rejection of a mount
 substitution before harness execution. It uses `debian:unstable` by default;
 `ORG_PODMAN_BASE_IMAGE` can select another compatible local image.

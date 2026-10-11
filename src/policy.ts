@@ -10,7 +10,12 @@ export const containerSettingsSchema = z.object({
   image: z.string().min(1).refine(s => !s.startsWith("-") && !/\s|\0/.test(s), "Invalid image reference").nullable().optional(),
   readOnlyDirs: z.array(z.string().min(1)).max(128).default([]),
   readWriteDirs: z.array(z.string().min(1)).max(128).default([]),
-}).strict();
+  readOnlyVolumes: z.array(z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.-]*$/).max(128)).max(128).default([]),
+  readWriteVolumes: z.array(z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.-]*$/).max(128)).max(128).default([]),
+}).strict().refine(settings => {
+  const names = [...settings.readOnlyVolumes, ...settings.readWriteVolumes];
+  return new Set(names).size === names.length;
+}, "Duplicate or conflicting volume grants");
 export type ContainerSettings = z.infer<typeof containerSettingsSchema>;
 export function parseSettings(value: unknown): ContainerSettings {
   const result = containerSettingsSchema.safeParse(value ?? {});
@@ -72,6 +77,19 @@ export function requireDelegation(next: ContainerSettings, previous: ContainerSe
     const mode = permission(next, path);
     if (mode > permission(previous, path) && (mode > permission(caller, path) || mode > permission(parent, path)))
       throw new ApiError("FORBIDDEN", `Cannot delegate ${mode === 2 ? "read/write" : "read-only"} access to ${path}; both caller and direct parent must have that access`);
+  }
+}
+export function volumeNames(settings: ContainerSettings): string[] {
+  return [...settings.readOnlyVolumes, ...settings.readWriteVolumes];
+}
+export function volumePermission(settings: ContainerSettings, name: string): number {
+  return settings.readWriteVolumes.includes(name) ? 2 : settings.readOnlyVolumes.includes(name) ? 1 : 0;
+}
+export function requireVolumeDelegation(next: ContainerSettings, previous: ContainerSettings, caller: ContainerSettings, parent: ContainerSettings): void {
+  for (const name of volumeNames(next)) {
+    const mode = volumePermission(next, name);
+    if (mode > volumePermission(previous, name) && (mode > volumePermission(caller, name) || mode > volumePermission(parent, name)))
+      throw new ApiError("FORBIDDEN", `Cannot delegate volume ${name}; both caller and direct parent must have sufficient access`);
   }
 }
 export function protect(settings: ContainerSettings, protectedPaths: string[]): void {

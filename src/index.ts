@@ -8,9 +8,10 @@ import { delimiter, dirname, join, resolve } from "node:path";
 import { z } from "zod";
 import type { AgentRecord, Caller, Operation, Settings } from "agent-organization/types";
 import type { LaunchContext, LaunchSpec, PluginHost, ServerPlugin } from "agent-organization/plugin";
-import { ApiError, bindMount, canonicalFuturePath, directory, hostPath, normalize, parseSettings, permission, protect, requireDelegation, roots } from "./policy.ts";
+import { ApiError, bindMount, canonicalFuturePath, directory, hostPath, normalize, parseSettings, permission, protect, requireDelegation, requireVolumeDelegation, roots, volumeNames, volumePermission } from "./policy.ts";
 import { createRelay } from "./relay.ts";
 import { mountIdentity } from "./mounts.ts";
+import { Volumes, volumeConfigSchema } from "./volumes.ts";
 
 const exec = promisify(execFile);
 const configSchema = z.object({
@@ -21,6 +22,8 @@ const configSchema = z.object({
   containerUid: z.number().int().min(1).max(65535).default(1000),
   containerGid: z.number().int().min(1).max(65535).default(1000),
   network: z.enum(["slirp4netns", "pasta", "none"]).default("pasta"),
+  /** Operator-owned eligible named volumes and their container destinations. */
+  volumes: volumeConfigSchema,
   /** Trusted harness variables only. Host credentials and HOME are never copied implicitly. */
   harnessEnv: z.array(z.string()).default(["ORG_PI_CONFIG", "ORG_PI_MCP_SERVERS", "ORG_PI_EXTENSION", "AGENTORG_SKILL_FILES"]),
 }).strict();
@@ -68,6 +71,8 @@ export function createPodmanPlugin(options: PodmanPluginOptions = {}): ServerPlu
     const launches = new WeakMap<LaunchContext, LaunchSpec>();
     const cleanupJobs = new Map<string, Promise<void>>();
     const command = async (args: string[]) => (await exec(podmanExecutable, args, { timeout: 20_000, maxBuffer: 4 * 1024 * 1024, env: process.env })).stdout.trim();
+    const volumes = new Volumes(config.volumes, join(host.dataDir, "podman-volume-pins.json"), command);
+    const volumeProtectedPaths = () => [...protectedPaths, config.mcpExecutable, config.entrypointExecutable];
     async function snapshot() { return (await host.request("organization.snapshot", {}, serverCaller) as { agents: AgentRecord[] }).agents; }
     function cleanup(key: string): Promise<void> {
       const pending = cleanupJobs.get(key);
@@ -87,11 +92,13 @@ export function createPodmanPlugin(options: PodmanPluginOptions = {}): ServerPlu
     host.registerSettings({ namespace: "podman", validate: parseSettings, ui: { fields: [
       { key: "readOnlyDirs", label: "Read-only grants", editor: "directories" },
       { key: "readWriteDirs", label: "Read/write grants", editor: "directories" },
+      { key: "readOnlyVolumes", label: "Read-only volumes", editor: "list" },
+      { key: "readWriteVolumes", label: "Read/write volumes", editor: "list" },
     ] } });
     host.registerCapability("podman", {
       settingsNamespace: "podman", defaultImage: config.defaultImage,
-      endpoints: { modify: "podman.modify" }, imageScopes: ["node", "inherited", "all"],
-      readOnlyDirs: true, readWriteDirs: true, isolatedContainers: true, modelDiscovery: false,
+      endpoints: { modify: "podman.modify", volumes: "podman.volumes" }, imageScopes: ["node", "inherited", "all"],
+      readOnlyDirs: true, readWriteDirs: true, readOnlyVolumes: true, readWriteVolumes: true, isolatedContainers: true, modelDiscovery: false,
     });
     host.onInitialize(async () => {
       if (process.getuid?.() === 0) throw new Error("Podman plugin requires a non-root server user");
@@ -112,6 +119,7 @@ export function createPodmanPlugin(options: PodmanPluginOptions = {}): ServerPlu
       // Recover after a host crash before core starts any agent. Never adopt orphan containers.
       const names = (await command(["ps", "--all", "--filter", `label=${label}`, "--format", "{{.Names}}"])).split("\n").filter(Boolean);
       if (names.length) await command(["rm", "--force", "--ignore", ...names]);
+      await volumes.initialize();
     });
     async function normalized(settings: Settings, agent: Readonly<AgentRecord>, launch = false): Promise<Settings> {
       const agents = await snapshot();
@@ -121,6 +129,7 @@ export function createPodmanPlugin(options: PodmanPluginOptions = {}): ServerPlu
       const cwd = await directory(hostPath(settings.cwd, base));
       const value = await normalize(settings.extensions?.podman, base);
       protect(value, protectedPaths);
+      await volumes.validate(value, volumeProtectedPaths(), launch);
       if (!permission(value, cwd)) throw new ApiError("INVALID_PARAMS", "cwd must be covered by an explicit readOnlyDirs or readWriteDirs mount");
       if (launch) {
         // Reject changed symlink targets at recovery/restart, rather than silently expanding access.
@@ -134,16 +143,20 @@ export function createPodmanPlugin(options: PodmanPluginOptions = {}): ServerPlu
       if (context.caller.kind !== "agent" || !["agent.create", "agent.modify"].includes(context.method)) return;
       const caller = context.agents.find(a => a.id === context.caller.id)!;
       const parent = context.agents.find(a => a.id === context.agent.parentId);
-      if (!parent) throw new ApiError("FORBIDDEN", "Agent directory grants require a direct parent");
+      if (!parent) throw new ApiError("FORBIDDEN", "Agent filesystem grants require a direct parent");
       const next = parseSettings(context.agent.settings.extensions?.podman);
       const old = parseSettings(context.previous?.settings.extensions?.podman);
       if ((next.image ?? null) !== (old.image ?? null)) throw new ApiError("FORBIDDEN", "Only clients may change container images");
       const callerGrants = parseSettings((await normalized(caller.settings, caller, true)).extensions?.podman);
       const parentGrants = parseSettings((await normalized(parent.settings, parent, true)).extensions?.podman);
       requireDelegation(next, old, callerGrants, parentGrants);
+      requireVolumeDelegation(next, old, callerGrants, parentGrants);
       // Agents cannot revoke a grant while leaving a previously delegated child with greater rights.
       for (const child of context.agents.filter(a => !a.removedAt && a.parentId === context.agent.id)) {
         const grants = parseSettings(child.settings.extensions?.podman);
+        for (const name of volumeNames(grants))
+          if (volumePermission(grants, name) <= volumePermission(old, name) && volumePermission(grants, name) > volumePermission(next, name))
+            throw new ApiError("FORBIDDEN", "Modify dependent child volume grants before reducing parent permissions");
         for (const path of new Set([...roots(grants), ...roots(old), ...roots(next)]))
           if (permission(grants, path) <= permission(old, path) && permission(grants, path) > permission(next, path))
             throw new ApiError("FORBIDDEN", "Modify dependent child grants before reducing parent permissions");
@@ -158,16 +171,24 @@ export function createPodmanPlugin(options: PodmanPluginOptions = {}): ServerPlu
       const strings = { type: "array", items: { type: "string", minLength: 1 }, description: "Existing mounted directories, absolute or relative to the target's direct parent cwd. Defaults to empty; no implicit cwd mount. Never escalate read-only access." };
       properties.readOnlyDirs = strings;
       properties.readWriteDirs = strings;
+      const volumeStrings = { type: "array", items: { type: "string", minLength: 1 }, description: "Operator-configured named volumes, not paths. No implicit inheritance. RW can delegate RO or RW; RO only RO. Volume grants do not cover cwd." };
+      properties.readOnlyVolumes = volumeStrings;
+      properties.readWriteVolumes = volumeStrings;
       return { ...tool, description: tool.description + " Every child runs in its own container with the inherited image. Explicitly grant directories covering cwd; grants must be within your and the direct parent's mounted permissions.", inputSchema: { ...tool.inputSchema, properties }, async execute(args, caller, api) {
-        const parsed = z.object({ readOnlyDirs: z.array(z.string().min(1)).optional(), readWriteDirs: z.array(z.string().min(1)).optional(), settings: z.record(z.string(), z.unknown()).optional() }).passthrough().parse(args);
-        const { readOnlyDirs, readWriteDirs, ...rest } = parsed;
-        if (readOnlyDirs === undefined && readWriteDirs === undefined) return tool.execute(rest, caller, api);
+        const parsed = z.object({ readOnlyDirs: z.array(z.string().min(1)).optional(), readWriteDirs: z.array(z.string().min(1)).optional(), readOnlyVolumes: z.array(z.string().min(1)).optional(), readWriteVolumes: z.array(z.string().min(1)).optional(), settings: z.record(z.string(), z.unknown()).optional() }).passthrough().parse(args);
+        const { readOnlyDirs, readWriteDirs, readOnlyVolumes, readWriteVolumes, ...rest } = parsed;
+        const dirsSupplied = readOnlyDirs !== undefined || readWriteDirs !== undefined;
+        const volumesSupplied = readOnlyVolumes !== undefined || readWriteVolumes !== undefined;
+        if (!dirsSupplied && !volumesSupplied) return tool.execute(rest, caller, api);
         const settings = parsed.settings ?? {};
         const extensions = settings.extensions as Record<string, unknown> | undefined;
-        if (extensions && Object.hasOwn(extensions, "podman")) throw new ApiError("INVALID_PARAMS", "Use top-level directory grants or settings.extensions.podman, not both");
+        if (extensions && Object.hasOwn(extensions, "podman")) throw new ApiError("INVALID_PARAMS", "Use top-level grants or settings.extensions.podman, not both");
         const current = toolName === "descendant_modify" ? parseSettings((await api.request("agent.get", { agentId: rest.agentId }, caller) as AgentRecord).settings.extensions?.podman) : {};
-        // Both arrays replace the grants. Omitted arrays are empty, never inherited.
-        return tool.execute({ ...rest, settings: { ...settings, extensions: { ...extensions, podman: { ...current, readOnlyDirs: readOnlyDirs ?? [], readWriteDirs: readWriteDirs ?? [] } } } }, caller, api);
+        // Each pair independently replaces its grants; never inherit from the parent.
+        return tool.execute({ ...rest, settings: { ...settings, extensions: { ...extensions, podman: { ...current,
+          ...(dirsSupplied && { readOnlyDirs: readOnlyDirs ?? [], readWriteDirs: readWriteDirs ?? [] }),
+          ...(volumesSupplied && { readOnlyVolumes: readOnlyVolumes ?? [], readWriteVolumes: readWriteVolumes ?? [] }),
+        } } } }, caller, api);
       } };
     });
 
@@ -209,6 +230,8 @@ export function createPodmanPlugin(options: PodmanPluginOptions = {}): ServerPlu
       const sessionDir = join(host.dataDir, "sessions", context.agent.id, String(context.agent.sessionNumber));
       const identities = await Promise.all([...paths, sessionDir].map(path => mountIdentity(path)));
       identities.push(await mountIdentity(resource.relay.path, true));
+      const volumeMounts = await volumes.validate(grants, [...volumeProtectedPaths(), sessionDir, resource.relay.path], true);
+      for (const volume of volumeMounts) args.push("--volume", volume.argument);
       for (const path of paths) args.push("--mount", bindMount(path, grants.readOnlyDirs.includes(path)));
       args.push("--mount", bindMount(sessionDir, false));
       args.push("--mount", bindMount(resource.relay.path, true));
@@ -222,7 +245,7 @@ export function createPodmanPlugin(options: PodmanPluginOptions = {}): ServerPlu
       // env values are host-owned and also support trusted `podman exec` diagnostics.
       args.push("--env", `ORG_SOCKET=${resource.relay.path}`, "--env", `ORG_AGENT_ID=${context.agent.id}`);
       if (!spec.command || spec.command.startsWith("-")) throw new Error("Invalid container harness command");
-      args.push("--entrypoint", config.entrypointExecutable, image, JSON.stringify({ mounts: identities, env: childEnv }), spec.command, ...spec.args);
+      args.push("--entrypoint", config.entrypointExecutable, image, JSON.stringify({ mounts: identities, ...(volumeMounts.length && { volumes: volumeMounts.map(v => v.identity) }), env: childEnv }), spec.command, ...spec.args);
       const wrapped: LaunchSpec = { command: podmanExecutable, args, cwd: settings.cwd, env: { ...process.env }, inheritEnv: false,
         gracefulStop: async () => { await command(["stop", "--ignore", "--time=1", resource.name]); await cleanup(context.agent.generation!); } };
       launches.set(context, { ...wrapped, args: [...wrapped.args] });
@@ -250,6 +273,12 @@ export function createPodmanPlugin(options: PodmanPluginOptions = {}): ServerPlu
       await Promise.all(keys.map(cleanup));
     });
     host.onShutdown(async () => { await Promise.all([...resources.keys()].map(cleanup).concat([...cleanupJobs.values()])); });
+
+    host.registerEndpoint("podman.volumes", async (input, caller: Caller) => {
+      if (caller.kind !== "client") throw new ApiError("FORBIDDEN", "Only clients may discover eligible volumes");
+      z.object({}).strict().parse(input ?? {});
+      return volumes.list(volumeProtectedPaths());
+    });
 
     // Client-only orchestration. Each step is revision-fenced; errors return completed steps
     // rather than silently retrying or pretending a multi-process restart is atomic.

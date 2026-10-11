@@ -6,19 +6,25 @@ import { OrganizationServer } from "../../agentorg/src/server.ts";
 import { OrganizationClient } from "agent-organization/client";
 import type { AgentRecord, Operation } from "agent-organization/types";
 import type { ServerPlugin } from "agent-organization/plugin";
-import { createPodmanPlugin } from "../src/index.ts";
+import { createPodmanPlugin, type PodmanPluginOptions } from "../src/index.ts";
 import { RpcClient } from "../src/rpc.ts";
 
 const cleanup: (() => Promise<void>)[] = [];
 afterEach(async () => { for (const fn of cleanup.splice(0)) await fn(); });
-async function setup(extra: ServerPlugin[] = []) {
+async function setup(extra: ServerPlugin[] = [], volumes: PodmanPluginOptions['volumes'] = {}) {
   const dir = mkdtempSync(join(tmpdir(), "podman-plugin-test-"));
   const workspace = join(dir, "workspace");
   mkdirSync(join(workspace, "child", "leaf"), { recursive: true });
   mkdirSync(join(workspace, "readonly")); mkdirSync(join(dir, "outside"));
   const log = join(dir, "podman.log");
   const executable = join(dir, "podman");
-  writeFileSync(executable, `#!/bin/sh\nexport FAKE_PODMAN_LOG='${log}'\nexec '${process.execPath}' '${join(import.meta.dir, "fixtures/podman.ts")}' "$@"\n`);
+  const volumeFile = join(dir, 'volumes.json');
+  const records = Object.fromEntries([...Object.keys(volumes), 'unrelated'].map(name => {
+    const mountpoint = join(dir, 'volume-data', name); mkdirSync(mountpoint, { recursive: true });
+    return [name, { Name: name, Driver: 'local', Options: {}, CreatedAt: '2026-01-01T00:00:00Z', Mountpoint: mountpoint }];
+  }));
+  writeFileSync(volumeFile, JSON.stringify(records));
+  writeFileSync(executable, `#!/bin/sh\nexport FAKE_PODMAN_VOLUMES='${volumeFile}'\nexport FAKE_PODMAN_LOG='${log}'\nexec '${process.execPath}' '${join(import.meta.dir, "fixtures/podman.ts")}' "$@"\n`);
   chmodSync(executable, 0o700);
   const harness: ServerPlugin = { apiVersion: 1, name: "fixture", setup(host) {
     host.registerHarness({ name: "fixture", launch: ({ agent, executionEnvironment }) => {
@@ -27,7 +33,7 @@ async function setup(extra: ServerPlugin[] = []) {
     } });
   } };
   const server = await OrganizationServer.start({ dataDir: join(dir, "data"), socketPath: join(dir, "data/server.sock"),
-    plugins: [harness, createPodmanPlugin({ podmanExecutable: executable, defaultImage: "test:v1" }), ...extra],
+    plugins: [harness, createPodmanPlugin({ podmanExecutable: executable, defaultImage: "test:v1", volumes }), ...extra],
     limits: { stopTimeoutMs: 1000, killTimeoutMs: 100, startTimeoutMs: 3000 } });
   const client = await OrganizationClient.connect(server.organization.socketPath);
   cleanup.push(async () => { client.close(); await server.close(); rmSync(dir, { recursive: true, force: true }); });
@@ -38,7 +44,7 @@ async function setup(extra: ServerPlugin[] = []) {
   const runs = () => readFileSync(log, "utf8").trim().split("\n").map(l => JSON.parse(l) as string[]).filter(a => a[0] === "run");
   const relay = (run: string[]) => run.find(s => s.startsWith("ORG_SOCKET="))!.slice("ORG_SOCKET=".length);
   const get = (id: string) => client.request<AgentRecord>("agent.get", { agentId: id });
-  return { dir, workspace, server, client, mutate, create, root, runs, relay, get };
+  return { dir, workspace, server, client, mutate, create, root, runs, relay, get, volumeFile };
 }
 function toolResult(result: any) { return JSON.parse(result.content[0].text); }
 
@@ -48,6 +54,8 @@ test("every launch is wrapped, grants are explicit, only private session and MCP
   expect(snapshot.capabilities.settingsEditors.podman).toEqual({ fields: [
     { key: "readOnlyDirs", label: "Read-only grants", editor: "directories" },
     { key: "readWriteDirs", label: "Read/write grants", editor: "directories" },
+    { key: "readOnlyVolumes", label: "Read-only volumes", editor: "list" },
+    { key: "readWriteVolumes", label: "Read/write volumes", editor: "list" },
   ] });
   const run = runs()[0]!;
   expect(run).toContain("--userns=keep-id:uid=1000,gid=1000"); expect(run).toContain("--cap-drop=ALL");
@@ -180,3 +188,92 @@ test("a later plugin cannot bypass the container wrapper", async () => {
   const op = await mutate("agent.restart", { agentId: root.id });
   expect(op.status).toBe("failed"); expect(op.error?.message).toContain("final Podman wrapper");
 });
+
+const volumeConfig = {
+  pi: { destination: '/home/pi/.pi', description: 'Shared Pi credentials' },
+  claude: { destination: '/home/pi/.claude', readOnly: true },
+};
+
+test('eligible volumes have safe discovery, explicit modes, private sessions and persistent identity pins', async () => {
+  const { client, server, workspace, root, mutate, create, runs, get, volumeFile, dir } = await setup([], volumeConfig);
+  await expect(server.organization.request('podman.volumes', {}, { kind: 'agent', id: root.id })).rejects.toThrow('Only clients');
+  expect(await client.request<any>('podman.volumes', {})).toEqual({ volumes: [
+    { name: 'claude', ...volumeConfig.claude },
+    { name: 'pi', ...volumeConfig.pi, readOnly: false },
+  ] });
+  const grants = { readWriteDirs: [workspace], readWriteVolumes: ['pi'], readOnlyVolumes: ['claude'] };
+  expect((await mutate('agent.modify', { agentId: root.id, settings: { extensions: { podman: grants } } })).status).toBe('completed');
+  let run = runs().at(-1)!;
+  expect(run).toContain('pi:/home/pi/.pi:rw,nocopy');
+  expect(run).toContain('claude:/home/pi/.claude:ro,nocopy');
+  const bootstrap = JSON.parse(run[run.indexOf('--entrypoint') + 3]!);
+  expect(bootstrap.volumes).toHaveLength(2);
+  expect(bootstrap.volumes.find((v: any) => v.path === '/home/pi/.pi')).toMatchObject({ readOnly: false });
+  expect(bootstrap.mounts.some((v: any) => v.path.includes('/sessions/'))).toBe(true);
+  const child = await create(root.id, workspace, { readOnlyDirs: [workspace] });
+  expect(child.status).toBe('completed');
+  expect(runs().at(-1)!.includes('--volume')).toBe(false);
+  expect(runs().at(-1)).toContain('test:v1'); // Image inherits, volumes do not.
+  await mutate('agent.stop', { agentId: root.id });
+  expect((await mutate('agent.restart', { agentId: root.id })).status).toBe('completed');
+  expect((await get(root.id)).settings.extensions?.podman).toMatchObject(grants);
+  const commands = readFileSync(join(dir, 'podman.log'), 'utf8').trim().split('\n').map(l => JSON.parse(l));
+  expect(commands.some(a => a[0] === 'volume' && a[1] === 'rm')).toBe(false);
+  const records = JSON.parse(readFileSync(volumeFile, 'utf8'));
+  records.pi.CreatedAt = '2026-02-01T00:00:00Z';
+  writeFileSync(volumeFile, JSON.stringify(records));
+  const replaced = await mutate('agent.restart', { agentId: root.id });
+  expect(replaced.error?.message).toContain('identity or configuration changed');
+  delete records.pi; writeFileSync(volumeFile, JSON.stringify(records));
+  expect((await mutate('agent.restart', { agentId: root.id })).error?.message).toContain('missing');
+}, 30_000);
+
+test('volume delegation is exact, independent of directory grants, and fences ancestor revocation', async () => {
+  const { root, workspace, mutate, client, runs, relay, create } = await setup([], volumeConfig);
+  await mutate('agent.modify', { agentId: root.id, settings: { extensions: { podman: { readWriteDirs: [workspace], readWriteVolumes: ['pi'] } } } });
+  const rpc = new RpcClient(relay(runs().at(-1)!));
+  try {
+    const call = async (name: string, args: any) => {
+      const result: any = await rpc.request('mcp.call', { name, arguments: args });
+      return result.isError ? toolResult(result) : client.wait(toolResult(result));
+    };
+    const base = { settings: { harness: 'fixture', cwd: workspace }, readOnlyDirs: [workspace] };
+    const ro = await call('child_create', { ...base, readOnlyVolumes: ['pi'] });
+    expect(ro.status).toBe('completed');
+    const rw = await call('child_create', { ...base, readWriteVolumes: ['pi'] });
+    expect(rw.status).toBe('completed');
+    expect((await call('child_create', { ...base, readOnlyVolumes: ['claude'] })).error?.code).toBe('FORBIDDEN');
+    const leaf = (await create(ro.agentId, workspace, { readOnlyDirs: [workspace] })).result as AgentRecord;
+    expect((await call('descendant_modify', { agentId: leaf.id, readWriteVolumes: ['pi'] })).error?.code).toBe('FORBIDDEN'); // Caller RW, direct parent only RO.
+    expect((await call('descendant_modify', { agentId: rw.agentId, readOnlyVolumes: [] })).status).toBe('completed'); // Revoke without dependent children.
+    expect((await call('descendant_modify', { agentId: ro.agentId, readWriteVolumes: ['pi'] })).status).toBe('completed');
+    expect((await call('descendant_modify', { agentId: leaf.id, readWriteVolumes: ['pi'] })).status).toBe('completed');
+    const revoke = await call('descendant_modify', { agentId: ro.agentId, readOnlyVolumes: ['pi'] });
+    expect(revoke.error?.message).toContain('dependent child volume');
+  } finally { rpc.close(); }
+  await mutate('agent.modify', { agentId: root.id, settings: { extensions: { podman: { readWriteDirs: [workspace], readOnlyVolumes: ['pi'] } } } });
+  const roRpc = new RpcClient(relay(runs().at(-1)!));
+  try {
+    const result = toolResult(await roRpc.request('mcp.call', { name: 'child_create', arguments: { settings: { harness: 'fixture', cwd: workspace }, readOnlyDirs: [workspace], readWriteVolumes: ['pi'] } }));
+    expect((await client.wait(result)).error?.code).toBe('FORBIDDEN');
+  } finally { roRpc.close(); }
+}, 60_000);
+
+test('final launch validation rejects omitted, added or altered named-volume mounts', async () => {
+  const { server, root, workspace, mutate } = await setup([], volumeConfig);
+  expect((await mutate('agent.modify', { agentId: root.id, settings: { extensions: { podman: { readWriteDirs: [workspace], readWriteVolumes: ['pi'] } } } })).status).toBe('completed');
+  let mode = 'omit';
+  server.organization.beforeLaunch(spec => {
+    const args = [...spec.args];
+    const index = args.indexOf('--volume');
+    if (mode === 'omit') args.splice(index, 2);
+    else if (mode === 'add') args.splice(index, 0, '--volume', 'unrelated:/home/pi/.codex:rw');
+    else args[index + 1] = 'pi:/home/pi/.pi:ro,nocopy';
+    return { ...spec, args };
+  });
+  for (mode of ['omit', 'add', 'alter']) {
+    const result = await mutate('agent.restart', { agentId: root.id });
+    expect(result.status).toBe('failed');
+    expect(result.error?.message).toContain('final Podman wrapper');
+  }
+}, 30_000);
