@@ -44,6 +44,11 @@ function toolResult(result: any) { return JSON.parse(result.content[0].text); }
 
 test("every launch is wrapped, grants are explicit, only private session and MCP socket are exposed", async () => {
   const { dir, workspace, root, create, runs, relay, server } = await setup();
+  const snapshot = await server.organization.request("organization.snapshot") as any;
+  expect(snapshot.capabilities.settingsEditors.podman).toEqual({ fields: [
+    { key: "readOnlyDirs", label: "Read-only grants", editor: "directories" },
+    { key: "readWriteDirs", label: "Read/write grants", editor: "directories" },
+  ] });
   const run = runs()[0]!;
   expect(run).toContain("--userns=keep-id:uid=1000,gid=1000"); expect(run).toContain("--cap-drop=ALL");
   expect(run).toContain("--security-opt=no-new-privileges"); expect(run).toContain("test:v1");

@@ -84,7 +84,10 @@ export function createPodmanPlugin(options: PodmanPluginOptions = {}): ServerPlu
       cleanupJobs.set(key, work);
       return work;
     }
-    host.registerSettings({ namespace: "podman", validate: parseSettings });
+    host.registerSettings({ namespace: "podman", validate: parseSettings, ui: { fields: [
+      { key: "readOnlyDirs", label: "Read-only grants", editor: "directories" },
+      { key: "readWriteDirs", label: "Read/write grants", editor: "directories" },
+    ] } });
     host.registerCapability("podman", {
       settingsNamespace: "podman", defaultImage: config.defaultImage,
       endpoints: { modify: "podman.modify" }, imageScopes: ["node", "inherited", "all"],

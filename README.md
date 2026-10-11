@@ -126,8 +126,14 @@ bounds records, outstanding requests, connections, and output buffering.
 ## TUI and image propagation
 
 The TUI discovers `capabilities.plugins.podman` and adds `containerImage`,
-`readOnlyDirs` and `readWriteDirs` editor fields. Directory fields are JSON arrays;
-a blank image means inherit. Provider/model entry is manual in container mode:
+`readOnlyDirs` and `readWriteDirs` editor fields. Directory grants use a reusable
+list editor with add/edit/remove, filtering and server-side cwd-like completion
+(↑/↓ select, Tab inserts/descends, Enter stages). They are still arrays in the API,
+not JSON prompts in the UI. Completion uses the parent/server startup base, never
+client-local paths, and requires existing directories rather than creating grants.
+The plugin also advertises these generic `directories` descriptors under
+`capabilities.settingsEditors.podman` for other clients; the TUI avoids duplicate
+fields. A blank image means inherit. Provider/model entry is manual in container mode:
 image-based catalog discovery is not implemented, and the TUI does not use the
 host's potentially different credentials/catalog. Trusted clients can still
 explicitly query the separate host discovery API. Saving an image change asks for:
