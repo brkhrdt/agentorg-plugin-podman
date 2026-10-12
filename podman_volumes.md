@@ -16,14 +16,14 @@ This document describes adding persistent Podman named-volume grants alongside t
 
 A Podman volume name alone does not specify where it appears in a container. The implementation must provide a trusted mapping from each selectable volume to a container destination. Do not accept arbitrary mount destinations, mount options, or Podman flags from agent settings.
 
-Recommended first implementation:
+Implemented contract (revised to avoid a per-volume server/plugin allowlist):
 
-1. The operator creates/initializes volumes with Podman outside agent settings.
-2. Volumes have an AgentOrg ownership/eligibility label and a trusted destination label (for example, `/home/pi/.pi`).
-3. The plugin lists only eligible volumes and validates the destination against a trusted allowlist. A volume cannot be relabeled or redirected by an agent.
-4. Each granted volume is mounted at its configured destination with `ro` or `rw` access. Reject duplicate names, duplicate destinations, conflicting directory/volume destinations, invalid names, and protected/runtime destinations.
+1. The operator creates/initializes volumes with Podman outside agent settings, using the same rootless Podman user as the server.
+2. `podman.volumes` discovers all existing plain local volumes without driver options. No labels, custom plugin modules, per-volume plugin entries or server restarts are required. The client-only catalog includes other applications' volumes; discovery never grants access.
+3. A trusted client selects a container destination through `podman.volume.configure({name, destination})`; the TUI prompts for it on first selection. The mapping and inspected identity persist in protected server state. Destination registration is not an agent grant. Agents cannot call this endpoint, choose destinations or redirect existing mappings.
+4. Each granted volume is mounted at its registered destination with `ro` or `rw` access. Reject duplicate names, overlapping granted destinations, conflicting directory/volume destinations, invalid names, and protected/runtime destinations.
 
-If labels are not a good contract, use an operator-supplied plugin configuration map of volume name to destination instead. Do not infer destinations from volume names. Avoid listing or mounting unrelated volumes belonging to the server's Podman account.
+Optional operator plugin configuration supplies destination defaults and read-only policies, but is not an eligibility allowlist. Do not infer destinations from volume names. Registration is idempotent for the same destination; deliberate replacement or remapping requires an explicit operator reset of the identity pin.
 
 ## Authorization and delegation
 
@@ -61,8 +61,8 @@ Image builds should remain credential-free. Rotating host credentials requires r
 
 ## API, capabilities, and validation
 
-- Extend the strict Podman settings schema and normalization/launch code with the two volume arrays. Validate names against Podman output and the trusted eligible-volume set; never pass unchecked strings to a shell (use argv arrays).
-- Advertise volume grant support and the volume-list endpoint through Podman's capability descriptor. The endpoint is client-only and returns selectable names plus safe display metadata/destination/access hints, never volume contents, mountpoint host paths, or credentials.
+- Extend the strict Podman settings schema and normalization/launch code with the two volume arrays. Validate names against Podman output and inspected plain-local identities; require a client-registered destination or optional operator default before granting access; never pass unchecked strings to a shell (use argv arrays).
+- Advertise volume grant support, volume-list and client-only destination-registration endpoints through Podman's capability descriptor. The endpoint is client-only and returns selectable names plus safe display metadata/destination/access hints, never volume contents, mountpoint host paths, or credentials.
 - Add tests for eligible/ineligible volumes, missing/replaced volumes, duplicate/conflicting targets, read-only/read-write mount arguments, persistence after container removal, image inheritance, and RO/RW delegation (including ancestor revocation rules).
 - Update API examples and docs to make clear that these are shared persistent stores, not per-agent session storage.
 
@@ -76,7 +76,7 @@ Use a reusable volume-list editor similar to the directory list editor:
 - On add/edit, request eligible volume choices from the server-side Podman endpoint, then fuzzy-filter the names as the user types.
 - Arrow keys move the highlighted choice; Enter stages it; Escape cancels. Tab may stage/complete the highlighted volume, matching the directory completion interaction.
 - Filter and selection operate on server-reported volume names, not the TUI machine's local Podman installation.
-- Display destination and trusted label/description where useful so users can distinguish volumes without exposing host mountpoint paths.
+- Display registered destination and trusted description where useful without exposing host mountpoint paths. If an existing volume has no destination, prompt the trusted user for an absolute container path and register it through the client-only endpoint before staging the grant.
 - Preserve draft values on discovery errors and allow no arbitrary volume names or destinations to bypass server validation.
 
 The TUI must not duplicate plugin-advertised fields: either use specialized Podman fields (as it currently does for directory grants) or fully reusable plugin field descriptors, but not both.
@@ -87,5 +87,5 @@ The TUI must not duplicate plugin-advertised fields: either use specialized Podm
 2. The volume is mounted at its trusted destination with the requested mode and survives container restart/removal.
 3. An agent can delegate only the same volume permissions it holds and its direct parent permits; RW can be reduced to RO, never the reverse.
 4. TUI users can discover, fuzzy-filter, arrow-select, stage, and remove volume grants without entering JSON or arbitrary host paths.
-5. Ineligible/system volumes, changed volume identities/configuration, invalid destinations, and unauthorized delegation fail closed.
+5. Unsupported volume drivers/options, changed volume identities/configuration, invalid destinations, and unauthorized delegation fail closed. Ordinary host-created volumes require neither labels nor plugin configuration.
 6. Pi `~/.pi` can be seeded from the host into a named volume without adding credentials to the image or build context, with explicit documentation of shared access and snapshot/rotation behavior.

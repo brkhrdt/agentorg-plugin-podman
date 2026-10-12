@@ -193,10 +193,8 @@ export default createPodmanPlugin({
   network: "pasta", // or "slirp4netns" (must be installed), "none"
   containerUid: 1000,
   containerGid: 1000,
-  volumes: {
-    "agentorg-pi-config": { destination: "/home/pi/.pi", description: "Shared Pi credentials" },
-    // readOnly: true optionally restricts a volume to read-only grants.
-  },
+  // Optional destination defaults, not required to discover/use host volumes:
+  // volumes: { "agentorg-pi-config": { destination: "/home/pi/.pi", readOnly: true } },
 });
 ```
 
@@ -212,11 +210,17 @@ helper locations. No arbitrary Podman flags are accepted from agent settings.
 
 ## Persistent harness volumes
 
-Create volumes as the **same rootless Podman user** that runs the server. The
-operator-owned `volumes` configuration above is the eligibility allowlist and
-trusted name-to-container-destination map; labels are not required. Defaults are
-empty. Only existing plain `local` volumes without driver options are supported
-(no host bind devices, NFS drivers or arbitrary storage plugins).
+Create volumes as the **same rootless Podman user** that runs the server. Any
+existing plain `local` volume without driver options is automatically discoverable,
+including volumes created after the server starts. **No per-volume plugin entry,
+labels, custom plugin module or server restart is needed.** Host bind devices,
+NFS drivers and arbitrary storage plugins remain unsupported.
+
+A volume name alone does not tell the server where to mount it. The trusted client
+or TUI chooses its container destination once; that mapping is saved in protected
+server state. Agents can delegate grants but cannot discover volumes or choose or
+redirect their destinations. Optional `volumes` plugin options provide defaults
+and RO-only policies for operators who want them; they are not an allowlist.
 
 ```sh
 podman volume create agentorg-pi-config
@@ -233,7 +237,19 @@ context or agent settings. It refuses nonempty uninitialized volumes and does
 nothing if already initialized. Partial copies remain uninitialized and require
 operator cleanup. It never automatically overwrites or synchronizes host changes.
 
-Grant the seeded volume via `agent.create` or `agent.modify`:
+In the TUI, add the volume to `readOnlyVolumes` or `readWriteVolumes`. For a newly
+discovered volume it asks for an absolute **container** destination, e.g.
+`/home/pi/.pi`. No host path or JSON entry is needed. Registration persists even
+if you discard the agent draft, but grants no agent access by itself.
+
+API clients first call the client-only `podman.volume.configure` endpoint:
+
+```json
+{"name": "agentorg-pi-config", "destination": "/home/pi/.pi"}
+```
+
+This inspects the existing volume and pins its identity and mapping. Repeating the
+same registration is idempotent. Then grant it via `agent.create` or `agent.modify`:
 
 ```json
 {
@@ -253,7 +269,7 @@ For Codex/Claude or other harnesses, configure appropriate destinations such as
 `/home/pi/.codex` or `/home/pi/.claude`, matching the image user's HOME. A volume
 does not authorize cwd. Duplicate names, overlapping granted destinations,
 directory/volume overlaps, and protected helper/runtime/session destinations are
-rejected. The allowlist may offer alternative volumes at the same destination,
+rejected. Multiple volumes may be registered at the same destination,
 but an agent may select only one. Empty arrays revoke access; supplying the entire
 Podman settings namespace replaces all grants as usual.
 
@@ -265,13 +281,18 @@ possible. Pi sessions still use AgentOrg's private per-agent session bind, even
 when `.pi` is shared. The plugin never deletes volumes on stop/removal or image changes.
 
 The client-only `podman.volumes` endpoint accepts `{}` and returns
-`{volumes: [{name, destination, description?, readOnly}]}` for eligible, existing,
-unchanged volumes. It exposes no contents, credentials or host mountpoints.
-Capabilities advertise it at `plugins.podman.endpoints.volumes`, and advertise both
+`{volumes: [{name, destination?, description?, readOnly}]}` for existing plain local,
+unchanged volumes. Unregistered volumes have no destination yet. The catalog
+includes volumes from other applications belonging to this Podman user; **select
+only stores you intend to share with agents**. It exposes no contents, credentials
+or host mountpoints. Capabilities advertise discovery at
+`plugins.podman.endpoints.volumes` and registration at
+`plugins.podman.endpoints.configureVolume`, and advertise both
 volume fields as generic `list` editors (the TUI uses specialized pickers without
 duplicating these descriptors).
 
-On the first grant the plugin records creation timestamp, root device/inode and
+On client registration (or the first grant using an operator default) the plugin
+records creation timestamp, root device/inode and
 trusted mapping/access policy in `<data-dir>/podman-volume-pins.json`. Recovery and
 every launch re-inspect through the configured Podman executable. The native
 startup gate checks volume root identity, exact mount destination and RO/RW mode
@@ -281,10 +302,12 @@ before running any harness code. Later plugins cannot add, omit or alter mounts.
 For credential rotation, stop all consumers and explicitly update the volume
 contents, or create/seed a new volume. To deliberately replace/redirect a pinned
 volume: stop the server and consumers, remove only that name's entry from the
-protected pin file, update trusted configuration if needed, restart the server,
-and re-save affected settings through a trusted client before launching them.
-Without this explicit reset, deletion/replacement/configuration changes fail closed.
-Removing an allowlist entry also blocks recovery. Deleting volumes is always a
+protected pin file, update optional operator defaults if needed, restart the server,
+register the destination again and re-save affected settings through a trusted
+client before launching them. Ordinary volume creation/registration never needs
+a restart; this reset is only for deliberately replacing or remapping a pinned
+volume. Without it, deletion/replacement/configuration changes fail closed.
+Deleting volumes is always a
 separate trusted operator action (`podman volume rm`), never an agent operation.
 
 ## Isolation and lifecycle

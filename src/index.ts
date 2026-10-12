@@ -11,7 +11,7 @@ import type { LaunchContext, LaunchSpec, PluginHost, ServerPlugin } from "agent-
 import { ApiError, bindMount, canonicalFuturePath, directory, hostPath, normalize, parseSettings, permission, protect, requireDelegation, requireVolumeDelegation, roots, volumeNames, volumePermission } from "./policy.ts";
 import { createRelay } from "./relay.ts";
 import { mountIdentity } from "./mounts.ts";
-import { Volumes, volumeConfigSchema } from "./volumes.ts";
+import { Volumes, volumeConfigSchema, volumeNameSchema } from "./volumes.ts";
 
 const exec = promisify(execFile);
 const configSchema = z.object({
@@ -22,7 +22,7 @@ const configSchema = z.object({
   containerUid: z.number().int().min(1).max(65535).default(1000),
   containerGid: z.number().int().min(1).max(65535).default(1000),
   network: z.enum(["slirp4netns", "pasta", "none"]).default("pasta"),
-  /** Operator-owned eligible named volumes and their container destinations. */
+  /** Optional operator destination defaults; other host volumes are discoverable too. */
   volumes: volumeConfigSchema,
   /** Trusted harness variables only. Host credentials and HOME are never copied implicitly. */
   harnessEnv: z.array(z.string()).default(["ORG_PI_CONFIG", "ORG_PI_MCP_SERVERS", "ORG_PI_EXTENSION", "AGENTORG_SKILL_FILES"]),
@@ -97,7 +97,7 @@ export function createPodmanPlugin(options: PodmanPluginOptions = {}): ServerPlu
     ] } });
     host.registerCapability("podman", {
       settingsNamespace: "podman", defaultImage: config.defaultImage,
-      endpoints: { modify: "podman.modify", volumes: "podman.volumes" }, imageScopes: ["node", "inherited", "all"],
+      endpoints: { modify: "podman.modify", volumes: "podman.volumes", configureVolume: "podman.volume.configure" }, imageScopes: ["node", "inherited", "all"],
       readOnlyDirs: true, readWriteDirs: true, readOnlyVolumes: true, readWriteVolumes: true, isolatedContainers: true, modelDiscovery: false,
     });
     host.onInitialize(async () => {
@@ -171,7 +171,7 @@ export function createPodmanPlugin(options: PodmanPluginOptions = {}): ServerPlu
       const strings = { type: "array", items: { type: "string", minLength: 1 }, description: "Existing mounted directories, absolute or relative to the target's direct parent cwd. Defaults to empty; no implicit cwd mount. Never escalate read-only access." };
       properties.readOnlyDirs = strings;
       properties.readWriteDirs = strings;
-      const volumeStrings = { type: "array", items: { type: "string", minLength: 1 }, description: "Operator-configured named volumes, not paths. No implicit inheritance. RW can delegate RO or RW; RO only RO. Volume grants do not cover cwd." };
+      const volumeStrings = { type: "array", items: { type: "string", minLength: 1 }, description: "Granted named volumes with client-configured destinations, not paths. No implicit inheritance. RW can delegate RO or RW; RO only RO. Volume grants do not cover cwd." };
       properties.readOnlyVolumes = volumeStrings;
       properties.readWriteVolumes = volumeStrings;
       return { ...tool, description: tool.description + " Every child runs in its own container with the inherited image. Explicitly grant directories covering cwd; grants must be within your and the direct parent's mounted permissions.", inputSchema: { ...tool.inputSchema, properties }, async execute(args, caller, api) {
@@ -278,6 +278,12 @@ export function createPodmanPlugin(options: PodmanPluginOptions = {}): ServerPlu
       if (caller.kind !== "client") throw new ApiError("FORBIDDEN", "Only clients may discover eligible volumes");
       z.object({}).strict().parse(input ?? {});
       return volumes.list(volumeProtectedPaths());
+    });
+
+    host.registerEndpoint("podman.volume.configure", async (input, caller: Caller) => {
+      if (caller.kind !== "client") throw new ApiError("FORBIDDEN", "Only clients may configure volume destinations");
+      const p = z.object({ name: volumeNameSchema, destination: z.string().min(1) }).strict().parse(input);
+      return volumes.configure(p.name, p.destination, volumeProtectedPaths());
     });
 
     // Client-only orchestration. Each step is revision-fenced; errors return completed steps

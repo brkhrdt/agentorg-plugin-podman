@@ -6,6 +6,9 @@ import { appendFileSync, readFileSync } from "node:fs";
 const args = process.argv.slice(2);
 if (process.env.FAKE_PODMAN_LOG) appendFileSync(process.env.FAKE_PODMAN_LOG, JSON.stringify(args) + "\n");
 if (args[0] === "info") { console.log(JSON.stringify({ host: { security: { rootless: true } }, store: {} })); process.exit(0); }
+if (args[0] === "volume" && args[1] === "ls") {
+  console.log(Object.keys(JSON.parse(readFileSync(process.env.FAKE_PODMAN_VOLUMES!, "utf8"))).join('\n')); process.exit(0);
+}
 if (args[0] === "volume" && args[1] === "inspect") {
   const volumes = JSON.parse(readFileSync(process.env.FAKE_PODMAN_VOLUMES!, "utf8"));
   if (!volumes[args[2]!]) process.exit(1);

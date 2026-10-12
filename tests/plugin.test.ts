@@ -200,6 +200,7 @@ test('eligible volumes have safe discovery, explicit modes, private sessions and
   expect(await client.request<any>('podman.volumes', {})).toEqual({ volumes: [
     { name: 'claude', ...volumeConfig.claude },
     { name: 'pi', ...volumeConfig.pi, readOnly: false },
+    { name: 'unrelated', readOnly: false },
   ] });
   const grants = { readWriteDirs: [workspace], readWriteVolumes: ['pi'], readOnlyVolumes: ['claude'] };
   expect((await mutate('agent.modify', { agentId: root.id, settings: { extensions: { podman: grants } } })).status).toBe('completed');
@@ -258,6 +259,24 @@ test('volume delegation is exact, independent of directory grants, and fences an
     expect((await client.wait(result)).error?.code).toBe('FORBIDDEN');
   } finally { roRpc.close(); }
 }, 60_000);
+
+test('new host volumes are discovered and usable without plugin configuration or server restart', async () => {
+  const { server, client, workspace, root, mutate, runs, volumeFile, dir } = await setup();
+  const records = JSON.parse(readFileSync(volumeFile, 'utf8'));
+  const mountpoint = join(dir, 'new-host-volume'); mkdirSync(mountpoint);
+  records['my-pi-volume'] = { Name: 'my-pi-volume', Driver: 'local', Options: {}, CreatedAt: '2026-03-01', Mountpoint: mountpoint };
+  writeFileSync(volumeFile, JSON.stringify(records));
+  expect((await client.request<any>('podman.volumes', {})).volumes).toContainEqual({ name: 'my-pi-volume', readOnly: false });
+  await expect(server.organization.request('podman.volume.configure', { name: 'my-pi-volume', destination: '/home/pi/.pi' }, { kind: 'agent', id: root.id })).rejects.toThrow('Only clients');
+  const invalid = await client.request<any>('podman.volume.configure', { name: 'my-pi-volume', destination: '/usr/local/bin' }).catch(error => error);
+  expect(invalid.code).toBe('FORBIDDEN');
+  expect(invalid.message).toContain('protected');
+  expect(await client.request<any>('podman.volume.configure', { name: 'my-pi-volume', destination: '/home/pi/.pi' })).toMatchObject({ name: 'my-pi-volume', destination: '/home/pi/.pi' });
+  const result = await mutate('agent.modify', { agentId: root.id, settings: { extensions: { podman: { readWriteDirs: [workspace], readOnlyVolumes: ['my-pi-volume'] } } } });
+  expect(result.status).toBe('completed');
+  expect(runs().at(-1)).toContain('my-pi-volume:/home/pi/.pi:ro,nocopy');
+  expect((await mutate('agent.restart', { agentId: root.id })).status).toBe('completed');
+}, 30_000);
 
 test('final launch validation rejects omitted, added or altered named-volume mounts', async () => {
   const { server, root, workspace, mutate } = await setup([], volumeConfig);

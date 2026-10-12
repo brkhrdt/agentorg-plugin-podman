@@ -13,6 +13,7 @@ async function setup() {
   const mountpoint = join(dir, 'data'); await mkdir(mountpoint);
   const records: Record<string, any> = { pi: { Name: 'pi', Driver: 'local', Options: {}, CreatedAt: '2026-01-01', Mountpoint: mountpoint } };
   const command = async (args: string[]) => {
+    if (args[1] === 'ls') return Object.keys(records).join('\n');
     expect(args.slice(0, 2)).toEqual(['volume', 'inspect']);
     if (!records[args[2]!]) throw new Error('missing');
     return JSON.stringify([records[args[2]!] ]);
@@ -37,15 +38,16 @@ test('trusted destinations reject runtime paths and mount syntax', () => {
 
 });
 
-test('discovery hides unrelated/missing/unsafe volumes; grants reject conflicts and policy escalation', async () => {
+test('discovery hides missing/unsafe volumes; grants reject conflicts and policy escalation', async () => {
   const { volumes, records, file, config, command } = await setup();
   records.second = { ...records.pi, Name: 'second' };
   for (const destination of ['/home/pi/.pi', '/home/pi/.pi/agent']) {
     const alternatives = new Volumes({ ...config, second: { destination, readOnly: false } }, file, command);
     await expect(alternatives.validate(parseSettings({ readOnlyVolumes: ['pi', 'second'] }), [], false)).rejects.toThrow('overlap');
   }
+  delete records.second;
   expect((await volumes.list()).volumes.map(v => v.name)).toEqual(['pi']);
-  await expect(volumes.validate(parseSettings({ readOnlyVolumes: ['other'] }), [], false)).rejects.toThrow('not eligible');
+  await expect(volumes.validate(parseSettings({ readOnlyVolumes: ['other'] }), [], false)).rejects.toThrow('Choose a container destination');
   await expect(volumes.validate(parseSettings({ readOnlyVolumes: ['pi'], readOnlyDirs: ['/home/pi'] }), [], false)).rejects.toThrow('conflicts');
   await expect(volumes.validate(parseSettings({ readOnlyVolumes: ['pi'] }), ['/home/pi/.pi/runtime'], false)).rejects.toThrow('protected');
   const restricted = new Volumes({ pi: { ...config.pi!, readOnly: true } }, file, command);
@@ -75,6 +77,25 @@ test('volume identity pins survive plugin recovery and detect replacement/config
   records.pi.CreatedAt = '2026-01-01';
   await rename(mountpoint, `${mountpoint}-old`); await mkdir(mountpoint);
   await expect(recovered.validate(grants, [], true)).rejects.toThrow('identity');
+});
+
+test('host volumes need no plugin config; client registrations and pins persist across recovery', async () => {
+  const { file, command } = await setup();
+  const volumes = new Volumes({}, file, command); await volumes.initialize();
+  expect(await volumes.list()).toEqual({ volumes: [{ name: 'pi', readOnly: false }] });
+  const grants = parseSettings({ readWriteVolumes: ['pi'] });
+  await expect(volumes.validate(grants, [], false)).rejects.toThrow('Choose a container destination');
+  await expect(volumes.configure('missing', '/home/pi/.pi', [])).rejects.toThrow('missing');
+  for (const destination of ['/', '/usr/bin', '/proc/x', 'relative', '/home/pi/.pi,ro=false'])
+    await expect(volumes.configure('pi', destination, [])).rejects.toThrow();
+  await expect(volumes.configure('pi', '/home/pi/.pi', ['/home/pi/.pi/private-relay'])).rejects.toThrow('protected');
+  expect(await volumes.configure('pi', '/home/pi/.pi', [])).toEqual({ name: 'pi', destination: '/home/pi/.pi', readOnly: false });
+  expect(await volumes.configure('pi', '/home/pi/.pi', [])).toMatchObject({ name: 'pi' }); // Idempotent.
+  await expect(volumes.configure('pi', '/home/pi/.codex', [])).rejects.toThrow('already configured');
+  expect((await volumes.validate(grants, [], true))[0]!.argument).toBe('pi:/home/pi/.pi:rw,nocopy');
+  const recovered = new Volumes({}, file, command); await recovered.initialize();
+  expect((await recovered.list()).volumes[0]!.destination).toBe('/home/pi/.pi');
+  expect(await recovered.validate(grants, [], true)).toEqual(await volumes.validate(grants, [], true));
 });
 
 test('volume gate rejects omitted/redirected mounts and changed access modes', () => {

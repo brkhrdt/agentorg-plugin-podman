@@ -40,9 +40,11 @@ test.skipIf(process.env.ORG_PODMAN_TEST !== "1")("real rootless Podman: OS-enfor
     await writeFile(join(hidden, "secret"), "host-secret");
     server = await OrganizationServer.start({ dataDir: join(dir, "data"), socketPath: join(dir, "data/server.sock"), plugins: [
       { apiVersion: 1, name: "fixture", setup(host) { host.registerHarness({ name: "fixture", launch: ({ agent }) => ({ command: "/usr/local/bin/container-agent", args: [], cwd: agent.settings.cwd }) }); } },
-      createPodmanPlugin({ defaultImage: image, network: "none", containerUid: process.getuid!(), containerGid: process.getgid!(), volumes: { [volume]: { destination: '/home/pi/.pi' } } }),
+      createPodmanPlugin({ defaultImage: image, network: "none", containerUid: process.getuid!(), containerGid: process.getgid!() }),
     ], limits: { startTimeoutMs: 30_000, stopTimeoutMs: 5000 } });
     client = await OrganizationClient.connect(server.organization.socketPath);
+    expect((await client.request<any>('podman.volumes', {})).volumes.some((v: any) => v.name === volume && v.destination === undefined)).toBe(true);
+    await client.request('podman.volume.configure', { name: volume, destination: '/home/pi/.pi' });
     const run = async (method: string, params: unknown) => client!.wait(await client!.request<Operation>(method, params));
     const creation = await run("agent.create", { settings: { harness: "fixture", cwd: rw, extensions: { podman: { readOnlyDirs: [ro], readWriteDirs: [rw], readWriteVolumes: [volume] } } } });
     expect(creation.status).toBe("completed");
