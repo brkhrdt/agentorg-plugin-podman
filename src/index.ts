@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { promisify } from "node:util";
+import { isDeepStrictEqual, promisify } from "node:util";
 import { createHash } from "node:crypto";
 import { access, mkdir, realpath, stat } from "node:fs/promises";
 import { constants } from "node:fs";
@@ -11,23 +11,11 @@ import type { LaunchContext, LaunchSpec, PluginHost, ServerPlugin } from "agent-
 import { ApiError, bindMount, canonicalFuturePath, directory, hostPath, normalize, parseSettings, permission, protect, requireDelegation, requireVolumeDelegation, roots, volumeNames, volumePermission } from "./policy.ts";
 import { createRelay } from "./relay.ts";
 import { mountIdentity } from "./mounts.ts";
-import { Volumes, volumeConfigSchema, volumeNameSchema } from "./volumes.ts";
+import { Volumes, volumeNameSchema } from "./volumes.ts";
+import { grantDefaults, podmanServerSettings, startupConfig, validateConfig, type PodmanConfig, type PodmanPluginOptions } from "./config.ts";
 
 const exec = promisify(execFile);
-const configSchema = z.object({
-  defaultImage: z.string().min(1).default("localhost/agentorg-pi:latest"),
-  podmanExecutable: z.string().min(1).default("podman"),
-  mcpExecutable: z.string().min(1).default("/usr/local/bin/agentorg-podman-mcp"),
-  entrypointExecutable: z.string().min(1).default("/usr/local/bin/agentorg-podman-exec"),
-  containerUid: z.number().int().min(1).max(65535).default(1000),
-  containerGid: z.number().int().min(1).max(65535).default(1000),
-  network: z.enum(["slirp4netns", "pasta", "none"]).default("pasta"),
-  /** Optional operator destination defaults; other host volumes are discoverable too. */
-  volumes: volumeConfigSchema,
-  /** Trusted harness variables only. Host credentials and HOME are never copied implicitly. */
-  harnessEnv: z.array(z.string()).default(["ORG_PI_CONFIG", "ORG_PI_MCP_SERVERS", "ORG_PI_EXTENSION", "AGENTORG_SKILL_FILES"]),
-}).strict();
-export type PodmanPluginOptions = z.input<typeof configSchema>;
+export type { PodmanPluginOptions } from "./config.ts";
 export type ImageScope = "node" | "inherited" | "all";
 export { containerSettingsSchema as podmanSettingsSchema, type ContainerSettings as PodmanSettings } from "./policy.ts";
 
@@ -57,9 +45,25 @@ export function imageDescendants(agentId: string, agents: Readonly<AgentRecord>[
 }
 
 export function createPodmanPlugin(options: PodmanPluginOptions = {}): ServerPlugin {
-  const config = configSchema.parse(options);
-  parseSettings({ image: config.defaultImage });
+  const defaults = startupConfig(options);
   return { apiVersion: 1, name: "podman", setup(host: PluginHost) {
+    host.registerServerSettings({ ...podmanServerSettings(defaults), async validateChange(next, previous) {
+      if (isDeepStrictEqual(next.containers, previous.containers)) return;
+      const profiles = validateConfig(next).containers;
+      const snapshot = await host.request('organization.snapshot', {}, serverCaller) as { capabilities: { harnesses: string[] } };
+      if (profiles.some(profile => profile.harness && !snapshot.capabilities.harnesses.includes(profile.harness)))
+        throw new ApiError('INVALID_PARAMS', 'Choose a loaded harness for the container configuration');
+      const images = [...new Set(profiles.map(profile => profile.image))];
+      if (!images.length) return;
+      try {
+        const ids = (await command(["image", "inspect", "--format={{.Id}}", ...images])).split("\n").filter(Boolean);
+        if (ids.length !== images.length || ids.some(id => !/^(sha256:)?[a-f0-9]{64}$/i.test(id))) throw new Error("Missing images");
+      } catch { throw new ApiError("INVALID_PARAMS", "Container configurations require locally available images; no images are pulled"); }
+    } });
+    const currentConfig = () => validateConfig(host.serverSettings("podman"));
+    // Restart-only control paths and volume policy are fixed for this server lifetime.
+    const config = currentConfig();
+    const launchConfigs = new WeakMap<LaunchContext, PodmanConfig>();
     const serverCaller = { kind: "server", id: "podman" } as const;
     const owner = createHash("sha256").update(resolve(host.dataDir)).digest("hex").slice(0, 20);
     const label = `org.agentorg.podman.owner=${owner}`;
@@ -96,8 +100,10 @@ export function createPodmanPlugin(options: PodmanPluginOptions = {}): ServerPlu
       { key: "readWriteVolumes", label: "Read/write volumes", editor: "list" },
     ] } });
     host.registerCapability("podman", {
-      settingsNamespace: "podman", defaultImage: config.defaultImage,
-      endpoints: { modify: "podman.modify", volumes: "podman.volumes", configureVolume: "podman.volume.configure" }, imageScopes: ["node", "inherited", "all"],
+      settingsNamespace: "podman", serverSettingsNamespace: "podman",
+      // Legacy startup hint only; mutable defaults are authoritative in server settings.
+      defaultImage: config.defaultImage,
+      endpoints: { modify: "podman.modify", volumes: "podman.volumes", configureVolume: "podman.volume.configure", profiles: "podman.profiles", images: "podman.choices.images", defaults: "podman.defaults" }, imageScopes: ["node", "inherited", "all"],
       readOnlyDirs: true, readWriteDirs: true, readOnlyVolumes: true, readWriteVolumes: true, isolatedContainers: true, modelDiscovery: false,
     });
     host.onInitialize(async () => {
@@ -140,12 +146,21 @@ export function createPodmanPlugin(options: PodmanPluginOptions = {}): ServerPlu
     }
     host.beforeSettings(normalized);
     host.beforeMutation(async context => {
+      const selected = parseSettings(context.agent.settings.extensions?.podman).profile;
+      const previous = parseSettings(context.previous?.settings.extensions?.podman).profile;
+      if (context.caller.kind !== "agent" && selected && !isDeepStrictEqual(selected, previous)) {
+        const catalog = await host.request("organization.settings.get", { namespace: "podman" }, serverCaller) as { revision: number };
+        if (selected.revision !== catalog.revision || !currentConfig().containers.some(profile => profile.id === selected.id))
+          throw new ApiError("CONFLICT", "Container configuration changed or was removed; select it again before creating the agent");
+      }
       if (context.caller.kind !== "agent" || !["agent.create", "agent.modify"].includes(context.method)) return;
       const caller = context.agents.find(a => a.id === context.caller.id)!;
       const parent = context.agents.find(a => a.id === context.agent.parentId);
       if (!parent) throw new ApiError("FORBIDDEN", "Agent filesystem grants require a direct parent");
       const next = parseSettings(context.agent.settings.extensions?.podman);
       const old = parseSettings(context.previous?.settings.extensions?.podman);
+      if (!isDeepStrictEqual(next.runtime, old.runtime) || !isDeepStrictEqual(next.profile, old.profile))
+        throw new ApiError("FORBIDDEN", "Only clients may choose container configurations or runtime settings");
       if ((next.image ?? null) !== (old.image ?? null)) throw new ApiError("FORBIDDEN", "Only clients may change container images");
       const callerGrants = parseSettings((await normalized(caller.settings, caller, true)).extensions?.podman);
       const parentGrants = parseSettings((await normalized(parent.settings, parent, true)).extensions?.podman);
@@ -193,6 +208,9 @@ export function createPodmanPlugin(options: PodmanPluginOptions = {}): ServerPlu
     });
 
     host.prepareLaunch(async context => {
+      // One detached configuration snapshot spans all asynchronous launch hooks.
+      const config = currentConfig();
+      launchConfigs.set(context, config);
       for (const path of [context.socketPath, await canonicalFuturePath(context.socketPath)])
         if (!protectedPaths.includes(path)) protectedPaths.push(path);
       await normalized(context.agent.settings, context.agent, true);
@@ -209,21 +227,31 @@ export function createPodmanPlugin(options: PodmanPluginOptions = {}): ServerPlu
       await mkdir(join(host.dataDir, "sessions", agent.id, String(agent.sessionNumber)), { recursive: true, mode: 0o700 });
     });
     host.beforeLaunch(async (spec, context) => {
+      const config = launchConfigs.get(context);
       const resource = resources.get(context.agent.generation!);
-      if (!resource || context.executionEnvironment !== "container") throw new Error("Missing container launch preparation");
+      if (!config || !resource || context.executionEnvironment !== "container") throw new Error("Missing container launch preparation");
       const settings = await normalized(context.agent.settings, context.agent, true);
       if (spec.cwd !== undefined && await directory(spec.cwd) !== settings.cwd) throw new ApiError("FORBIDDEN", "Harness cwd differs from the permitted container cwd");
       const grants = parseSettings(settings.extensions?.podman);
       protect(grants, [...protectedPaths, dirname(resource.relay.path)]);
-      const image = effectiveImage(context.agent, await snapshot(), config.defaultImage);
+      const agents = await snapshot();
+      const image = effectiveImage(context.agent, agents, config.defaultImage);
+      let ancestor: Readonly<AgentRecord> | undefined = context.agent;
+      const seen = new Set<string>();
+      let runtime = grants.runtime;
+      while (!runtime && ancestor?.parentId && !seen.has(ancestor.id)) {
+        seen.add(ancestor.id); ancestor = agents.find(a => a.id === ancestor!.parentId);
+        runtime = parseSettings(ancestor?.settings.extensions?.podman).runtime;
+      }
+      const container = { ...config, ...runtime };
       const env: Record<string, string | undefined> = { ...settings.env };
-      for (const name of config.harnessEnv) if (spec.env?.[name] !== undefined) env[name] = spec.env[name];
+      for (const name of container.harnessEnv) if (spec.env?.[name] !== undefined) env[name] = spec.env[name];
       Object.assign(env, context.env, { ORG_SOCKET: resource.relay.path, ORG_AGENT_ID: context.agent.id });
       // The generation token remains exclusively on the host, even if supplied in settings.env.
       delete env.ORG_TOKEN;
       const args = ["run", "--rm", "--interactive", "--pull=never", "--name", resource.name, "--label", label,
-        `--userns=keep-id:uid=${config.containerUid},gid=${config.containerGid}`, "--user", `${config.containerUid}:${config.containerGid}`, "--cap-drop=ALL", "--security-opt=no-new-privileges",
-        "--pid=private", "--ipc=private", "--pids-limit=256", "--network", config.network === "slirp4netns" ? "slirp4netns:allow_host_loopback=false" : config.network,
+        `--userns=keep-id:uid=${container.containerUid},gid=${container.containerGid}`, "--user", `${container.containerUid}:${container.containerGid}`, "--cap-drop=ALL", "--security-opt=no-new-privileges",
+        "--pid=private", "--ipc=private", "--pids-limit=256", "--network", container.network === "slirp4netns" ? "slirp4netns:allow_host_loopback=false" : container.network,
         "--workdir", settings.cwd!];
       // Parent mounts first so more specific read-only/read-write islands take precedence.
       const paths = roots(grants).sort((a, b) => a.length - b.length);
@@ -274,6 +302,53 @@ export function createPodmanPlugin(options: PodmanPluginOptions = {}): ServerPlu
     });
     host.onShutdown(async () => { await Promise.all([...resources.keys()].map(cleanup).concat([...cleanupJobs.values()])); });
 
+    const clientOnly = (caller: Caller) => { if (caller.kind === "agent") throw new ApiError("FORBIDDEN", "Container configuration/discovery is client-only"); };
+    host.registerEndpoint("podman.defaults", (input, caller) => {
+      clientOnly(caller); z.object({}).strict().parse(input ?? {});
+      return grantDefaults(currentConfig());
+    });
+    host.registerEndpoint("podman.profiles", async (input, caller) => {
+      clientOnly(caller); z.object({}).strict().parse(input ?? {});
+      const settings = await host.request("organization.settings.get", { namespace: "podman" }, serverCaller) as { revision: number };
+      return { revision: settings.revision, profiles: currentConfig().containers };
+    });
+    host.registerEndpoint("podman.choices.images", async (input, caller) => {
+      clientOnly(caller); z.object({}).strict().parse(input ?? {});
+      try {
+        const records = JSON.parse(await command(["images", "--format=json"]));
+        if (!Array.isArray(records)) throw new Error("Invalid image catalog");
+        const choices = new Map<string, string>();
+        for (const image of records) {
+          const names = Array.isArray(image.Names) ? image.Names : Array.isArray(image.RepoTags) ? image.RepoTags : [];
+          const id = image.Id ?? image.ID;
+          for (const name of names) if (typeof name === "string" && !name.includes("<none>") && !/\s|\0/.test(name)) choices.set(name, name);
+          if (!names.length && typeof id === "string" && /^(sha256:)?[a-f0-9]{64}$/i.test(id)) choices.set(id, `(untagged) · ${id.slice(0, 20)}`);
+        }
+        return { choices: [...choices].sort(([a], [b]) => a.localeCompare(b)).map(([value, label]) => ({ value, label })) };
+      } catch { throw new ApiError("UNAVAILABLE", "Could not discover local Podman images"); }
+    });
+    host.registerEndpoint("podman.choices.harnesses", async (input, caller) => {
+      clientOnly(caller); z.object({}).strict().parse(input ?? {});
+      const state = await host.request("organization.snapshot", {}, serverCaller) as { capabilities: { harnesses: string[] } };
+      return { choices: state.capabilities.harnesses.map(value => ({ value, label: value })) };
+    });
+    host.registerEndpoint("podman.choices.volumes.defaults", async (input, caller) => {
+      clientOnly(caller); z.object({}).strict().parse(input ?? {});
+      const catalog = await volumes.list(volumeProtectedPaths());
+      return { choices: catalog.volumes.map(v => ({ value: v.name,
+        label: `${v.name} → ${v.destination ?? '(choose container destination)'}${v.readOnly ? ' · read-only' : ''}`,
+        defaults: { destination: v.destination ?? '', readOnly: v.readOnly, description: v.description ?? '' },
+      })) };
+    });
+    for (const mode of ["ro", "rw"] as const) host.registerEndpoint(`podman.choices.volumes.${mode}`, async (input, caller) => {
+      clientOnly(caller); z.object({}).strict().parse(input ?? {});
+      const catalog = await volumes.list(volumeProtectedPaths());
+      return { choices: catalog.volumes.filter(v => mode !== "rw" || !v.readOnly).map(v => ({ value: v.name,
+        label: `${v.name} → ${v.destination ?? '(choose container destination)'}${v.description ? ` · ${v.description}` : ''}`,
+        ...(!v.destination && { setup: { endpoint: 'podman.volume.configure', params: { name: v.name }, inputKey: 'destination', label: `Container destination for ${v.name} (absolute path inside container)` } }),
+      })) };
+    });
+
     host.registerEndpoint("podman.volumes", async (input, caller: Caller) => {
       if (caller.kind !== "client") throw new ApiError("FORBIDDEN", "Only clients may discover eligible volumes");
       z.object({}).strict().parse(input ?? {});
@@ -292,6 +367,7 @@ export function createPodmanPlugin(options: PodmanPluginOptions = {}): ServerPlu
       if (caller.kind !== "client") throw new ApiError("FORBIDDEN", "Only clients may choose image propagation");
       const p = z.object({ agentId: z.string(), expectedRevision: z.number().int(), imageScope: z.enum(["node", "inherited", "all"]),
         name: z.string().optional(), metadata: z.record(z.string(), z.unknown()).optional(), settings: z.record(z.string(), z.unknown()) }).strict().parse(input);
+      const fallbackImage = currentConfig().defaultImage;
       const agents = await snapshot();
       const agent = agents.find(a => a.id === p.agentId && !a.removedAt);
       if (!agent) throw new ApiError("NOT_FOUND", "Agent not found");
@@ -307,9 +383,9 @@ export function createPodmanPlugin(options: PodmanPluginOptions = {}): ServerPlu
         operations.push(op);
         if (op.status !== "completed") throw new Error(op.error?.message ?? `Mutation ${op.status}`);
       }
-      const oldImage = effectiveImage(agent, agents, config.defaultImage);
+      const oldImage = effectiveImage(agent, agents, fallbackImage);
       const proposed = { ...agent, settings: { ...agent.settings, extensions: { ...agent.settings.extensions, podman: next } } };
-      const newImage = effectiveImage(proposed, agents, config.defaultImage);
+      const newImage = effectiveImage(proposed, agents, fallbackImage);
       if (oldImage !== newImage && p.imageScope === "node") {
         // Pin direct inheriting children so their entire branches retain the old image.
         for (const child of agents.filter(a => !a.removedAt && a.parentId === agent.id && !parseSettings(a.settings.extensions?.podman).image)) {

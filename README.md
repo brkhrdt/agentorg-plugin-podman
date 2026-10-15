@@ -181,9 +181,176 @@ children while pinning their image; their descendants keep their old effective
 image. Raw `agent.modify` does not offer propagation scopes: inherited descendants
 observe a changed ancestor image on their next explicit restart.
 
+## Named container configurations
+
+Configure reusable containers through **v → s → Podman containers → Container
+configurations**. Press **a** to add, Enter to edit, or **d** to remove a named
+configuration. The entry opens a field form—no raw JSON object is required.
+Choose an image from the server's local Podman store, choose network, UID/GID,
+harness defaults, working directory and explicit RO/RW directory/volume defaults.
+New entries seed runtime defaults from the current settings draft, not stale
+startup values. Environment values/credentials and arbitrary secret-bearing
+harness options are deliberately not configuration fields.
+
+Images and volumes are discovered **on the server**, never on the TUI machine.
+Volumes without a destination prompt for an absolute **container** path before
+selection. This trusted registration persists independently of the draft, but
+never grants an agent access by itself. RW choices exclude RO-only volumes.
+**pasta**, **slirp4netns**, and **none** are the supported network modes; network
+is a bounded selector, not arbitrary text. The appropriate pasta/slirp4netns
+helper must be installed on the server. `slirp4netns` disables host loopback.
+
+Press **S** to stage the entry into its list, **S** to stage the list into the
+server draft, then **S** and confirm the server-wide save. Names, IDs, public
+values and grant syntax are validated before saving. Changed catalogs also check
+that image references exist **locally** (without pulling) and any explicit
+harness names are loaded. This is not a mount test or an in-container capability
+probe: provider/model defaults remain manual, and image/runtime/adapter
+compatibility is still ultimately checked on launch. Capability-driven model and
+option discovery remains a follow-up.
+
+When creating an agent (**n**), open **Container configuration** and select the
+saved entry. Its image, runtime settings, cwd and grant defaults populate the
+**draft** for review. Selecting a different entry clears/replaces stale provider/
+model choices. Review cwd coverage and every grant before saving; the usual
+launch-time protection, normalization and delegation checks remain authoritative.
+The image field also has a live local-image picker (`m` for manual/inherited
+entry). Older servers without these capabilities retain manual editing.
+
+Creation persists a detached runtime/image/grant snapshot plus configuration ID,
+name and catalog revision in `settings.extensions.podman`. A stale/deleted
+selection before creation returns `CONFLICT`: select it again, don't blindly
+retry. Editing/resetting/deleting a catalog entry never rewrites or restarts
+existing agents. Their snapshots remain usable even after the entry disappears;
+per-agent grant edits preserve those snapshots. Children inherit an ancestor's
+explicit image/runtime, **never its filesystem or volume grants**. Configuration
+selection and runtime changes are client-only, with no MCP management tool.
+
+API discovery advertises `plugins.podman.endpoints.profiles` and `.images`:
+`podman.profiles {}` returns `{revision, profiles}`. Catalog entries live in the
+shared core-owned `organization.settings.get/update` group `podman`, field
+`containers`, with version-1/2 settings migrated to version 3. Each entry has
+`id`, `name`, `image`, `network`, `containerUid`, `containerGid`, `harnessEnv`
+(variable names only), `harness`, `provider`, `model`, `cwd`, `readOnlyDirs`,
+`readWriteDirs`, `readOnlyVolumes`, and `readWriteVolumes`. The core still owns
+persistence, revisions, reset, authorization and atomic change events.
+
+## Server-wide Podman settings
+
+The default settings now use the **same four lists** as named configurations:
+**Read-only directory defaults**, **Read/write directory defaults**, **Read-only
+volumes**, and **Read/write volumes**. Volume lists use server-discovered pickers
+on **a**; unknown destinations prompt for a path **inside the container**. Known
+destinations are reused and RW choices exclude RO-only volumes.
+
+Saved lists seed **new client-created agent drafts** and **new configurations**
+(the latter use the current settings draft, including unsaved edits). Review and
+save explicitly. They apply without a server restart and never rewrite existing
+agents or saved configurations. Agent/MCP-created children and raw API requests
+still supply explicit grants: these defaults never silently expand authority.
+Reset/deletion does not delete host data or registrations/pins. Explicit volume
+destination registration persists independently of the settings draft.
+
+The old `volumes` destination-policy map is retained as a deprecated public API/
+operator compatibility setting, omitted from the normal TUI form. Version-1/2
+migrations preserve it, including existing RO restrictions and pins; its entries
+are **not** silently converted into grants. Legacy policy edits still require a
+server restart and cannot remap or weaken an existing identity pin.
+
+Requires an AgentOrg server with the public server-settings framework. Podman
+opts in under namespace **`podman`**; the TUI discovers its fields automatically.
+Open **v → s → Podman containers**, stage changes, then **S** and confirm the
+server-wide save. These are not per-agent grants or client preferences. Every
+trusted socket client sees the same persisted configuration; agents cannot read
+or edit the settings API, and no settings MCP tool is provided.
+
+| Setting | Effect |
+| --- | --- |
+| `defaultImage` | Future launches/restarts without an explicit ancestor image |
+| `network` (`pasta`, `slirp4netns`, `none`) | Future launches |
+| `containerUid`, `containerGid` (integers 1–65535) | Future launches |
+| `harnessEnv` (unique variable **names**, not values) | Future launches |
+| `containers` (named configurations) | Newly selected agent drafts; existing snapshots unchanged |
+| `readOnlyDirs`, `readWriteDirs` | New agent drafts / new configurations |
+| `readOnlyVolumes`, `readWriteVolumes` | New agent drafts / new configurations |
+| `volumes` (deprecated compatibility destination policy; omitted from TUI) | Server restart |
+| `podmanExecutable` (trusted host path/PATH command) | Server restart |
+| `mcpExecutable`, `entrypointExecutable` (trusted image helpers) | Server restart |
+
+Saves never automatically restart agents or change their revisions/grants. Each
+launch captures one detached configuration snapshot across its asynchronous
+preparation/wrapping hooks. Restart-only fields retain their old effective values
+and display a restart-required indicator until the server reopens. The resolved
+Podman executable, cleanup commands, protected helper paths, and legacy volume
+destination policy stay consistent throughout the current server lifetime.
+
+`defaultImage` changes the fallback for **subsequent** launches, including new
+children of a running ancestor whose image is not explicitly set. Explicit agent
+or ancestor images still win. Running containers keep their current image/network/
+UID/GID/environment until an explicit lifecycle operation creates a new container.
+Changing the server fallback is not a subtree image-propagation operation.
+
+Use `organization.settings.get {namespace: "podman"}` to get descriptors, revision,
+startup defaults, desired values, effective values, and pending restarts. Update
+with the current revision, for example:
+
+```json
+{"namespace":"podman","expectedRevision":0,"patch":{"defaultImage":"localhost/agentorg-pi:v2","network":"none"}}
+```
+
+Reset removes overrides, restoring the current plugin-module startup defaults:
+
+```json
+{"namespace":"podman","expectedRevision":1,"reset":["defaultImage","network"]}
+```
+
+Core owns SQLite persistence, atomic change events and revision checks. Saved
+overrides survive restart and override module options. Stale saves fail with
+`CONFLICT`; the TUI retains the draft without retrying. Values are authoritative
+in `organization.settings.get/list`; `capabilities.plugins.podman.defaultImage`
+remains a legacy **startup hint**, and `serverSettingsNamespace: "podman"` points
+to the editable configuration. Per-agent `settingsNamespace` remains separate.
+
+Validation before saving checks image-reference syntax, integer bounds, network
+choices, executable syntax, variable-name uniqueness, strict volume mapping
+shape/destination policy, and named-configuration schema. Unknown/nested
+credential fields are rejected. Ordinary reads and unrelated/no-op saves do not
+execute availability checks. Changed configuration catalogs inspect local images
+before committing; they never pull images or test mounts. Host executable
+existence/rootless checks run at initialization; image/helper compatibility is
+checked on launch. In-container capability probes are not implemented yet.
+No environment values, credentials, volume contents or host volume mountpoints
+are settings fields. `harnessEnv` names
+select values from trusted harness specs only, never ambient host variables; the
+generation token is always stripped.
+
+The four defaults are independent lists. For example, a settings patch can contain:
+
+```json
+{"readOnlyDirs":["/srv/config"],"readWriteDirs":["/srv/work"],"readOnlyVolumes":["pi-config"],"readWriteVolumes":[]}
+```
+
+`plugins.podman.endpoints.defaults` advertises `podman.defaults {}`, which returns
+these four effective lists to trusted clients (no I/O or agent/MCP access). TUI
+new-agent creation reads a fresh, detached copy before opening the draft; failure
+or canceled navigation never silently falls back to missing defaults.
+
+Legacy `volumes` policy remains an object map through module options/API only,
+for example `{"pi-config":{"destination":"/home/pi/.pi","readOnly":true}}`.
+It is **not** an eligibility allowlist or a grant list. Use the legacy settings
+API to remove its overrides; `{}` empties that policy, while reset restores
+operator policy defaults.
+Deleting/resetting an entry does **not** delete a host volume, revoke any agent
+grant, or erase its trusted destination/identity pin. Previously registered/pinned
+volumes keep their mappings and RO-only policy even after removal from defaults.
+Changing a pinned destination or policy fails closed after restart; deliberate
+remapping still requires the explicit operator reset described below. Use agent
+grant editors to revoke access and `podman volume rm` separately to delete data.
+
 ## Operator configuration
 
-Create a trusted plugin module:
+Module options define startup/reset defaults, not locks. A trusted module is
+still useful for deployment defaults; ordinary edits no longer require one:
 
 ```ts
 import { createPodmanPlugin } from "./agentorg-plugin-podman/src/index.ts";
@@ -348,11 +515,21 @@ bun install --frozen-lockfile
 bun run check
 bun test                    # deterministic ACP + fake Podman, no model calls
 bun run test:podman          # real rootless Podman; builds a temporary fixture image
+bun run test:tui             # requires adjacent agentorg_tui + its dependencies, script and stty
 # After building the example image (startup + native MCP only; no model calls):
 ORG_PODMAN_PI_IMAGE=localhost/agentorg-pi:latest bun test tests/pi-image.test.ts
 ```
 
-The real test verifies RO/RW enforcement for directories and volumes, shared volume
+Server-settings tests cover client/agent authorization, schema/policy validation,
+no probes on reads, local-image checks before changed catalog saves, named
+configuration snapshots/deletion/stale selection, live future-launch changes without agent restarts,
+shared revisions/events, persistence/reset, pending server restarts, executable
+and helper activation, and fail-closed volume pin behavior. The optional TUI test
+runs a real socket server and terminal client against fake rootless Podman,
+exercising image/volume/network discovery, destination registration, named
+configuration editing/confirmation, new-agent selection/launch, deletion and reset.
+
+The real Podman test verifies RO/RW enforcement for directories and volumes, shared volume
 contents and persistence after agent removal, idempotent credential-free image seeding,
 unmounted host files and sibling sessions,
 native MCP delegation, independent containers, removal, and rejection of a mount

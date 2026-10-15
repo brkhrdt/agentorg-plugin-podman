@@ -18,6 +18,13 @@ interface Identity { createdAt: string; mountpoint: string; dev: string; ino: st
 interface Pin extends Identity { destination: string; readOnly: boolean }
 export interface VolumeMount { argument: string; identity: MountIdentity & { readOnly: boolean } }
 
+/** Pure destination policy, shared by startup/settings validation and runtime grants. */
+export function validateVolumeDestination(path: string, protectedPaths: string[] = []): void {
+  if (!posix.isAbsolute(path) || posix.normalize(path) !== path || path.endsWith('/') || /[,\s:\\\0]/.test(path))
+    throw new ApiError("INVALID_PARAMS", "Volume destinations must be normalized absolute container paths without mount syntax");
+  protect({ readOnlyDirs: [path], readWriteDirs: [], readOnlyVolumes: [], readWriteVolumes: [] }, protectedPaths);
+}
+
 /** Discover existing plain local volumes. Trusted clients register destinations;
  * agents only delegate names and permissions. Registrations/identity pins live in
  * protected host state and survive recovery, without plugin config or restarts.
@@ -26,12 +33,7 @@ export class Volumes {
   private pins: Record<string, Pin> = {};
   private queue: Promise<unknown> = Promise.resolve();
   constructor(private config: VolumeConfig, private file: string, private command: (args: string[]) => Promise<string>) {
-    for (const entry of Object.values(config)) this.protectDestination(entry.destination, []);
-  }
-  private protectDestination(path: string, protectedPaths: string[]): void {
-    if (!posix.isAbsolute(path) || posix.normalize(path) !== path || path.endsWith('/') || /[,\s:\\\0]/.test(path))
-      throw new ApiError("INVALID_PARAMS", "Volume destinations must be normalized absolute container paths without mount syntax");
-    protect({ readOnlyDirs: [path], readWriteDirs: [], readOnlyVolumes: [], readWriteVolumes: [] }, protectedPaths);
+    for (const entry of Object.values(config)) validateVolumeDestination(entry.destination);
   }
   async initialize(): Promise<void> {
     try {
@@ -88,7 +90,7 @@ export class Volumes {
   /** Caller authorization belongs to the client-only endpoint. Registration does
    * not grant access to any agent. Once pinned, remapping requires operator reset. */
   async configure(name: string, destination: string, protectedPaths: string[]): Promise<VolumeChoice> {
-    this.protectDestination(destination, protectedPaths);
+    validateVolumeDestination(destination, protectedPaths);
     return this.serialized(async () => {
       const existing = this.mapping(name);
       if (existing && existing.destination !== destination)
@@ -109,7 +111,7 @@ export class Volumes {
       const mapping = this.mapping(name);
       try {
         if (mapping) {
-          this.protectDestination(mapping.destination, protectedPaths);
+          validateVolumeDestination(mapping.destination, protectedPaths);
           this.check(name, await this.inspectPin(name, mapping));
         } else await this.inspect(name);
       } catch { continue; } // Never expose host paths, contents or inspect output.
@@ -128,7 +130,7 @@ export class Volumes {
       if (destinations.some(p => contains(p, destination) || contains(destination, p)))
         throw new ApiError("INVALID_PARAMS", "Granted volume destinations must not overlap");
       destinations.push(destination);
-      this.protectDestination(destination, protectedPaths);
+      validateVolumeDestination(destination, protectedPaths);
       if (roots(settings).some(p => contains(p, destination) || contains(destination, p)))
         throw new ApiError("INVALID_PARAMS", `Volume destination conflicts with a directory grant: ${name}`);
       const pin = await this.pinned(name, entry, requirePin);
