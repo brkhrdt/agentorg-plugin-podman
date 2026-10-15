@@ -14,6 +14,8 @@ subuid/subgid mappings first. The server itself must run as a non-root user.
 cd agentorg-plugin-podman
 sh examples/pi/build.sh
 # Optional: sh examples/pi/build.sh --build-arg PI_VERSION=1.0.2
+# Build, then create/seed a minimal Pi config volume (credentials never enter the image):
+# sh examples/pi/build.sh --seed-volume agentorg-pi-config
 
 cd ../agentorg
 bun start --data-dir /tmp/my-agentorg-data \
@@ -391,18 +393,45 @@ and RO-only policies for operators who want them; they are not an allowlist.
 
 ```sh
 podman volume create agentorg-pi-config
-# Explicit, one-time snapshot; use a trusted local image with sh, cp and find:
+# Explicit, one-time minimal snapshot; use a trusted local image with Node:
 sh examples/seed-volume.sh agentorg-pi-config localhost/agentorg-pi:latest
 # Optional third argument selects a host directory other than ~/.pi.
 # CONTAINER_UID / CONTAINER_GID default to 1000; match the plugin/image user.
 ```
 
-The helper copies contents including dotfiles, without printing credentials. It
-uses a temporary network-disabled container with a read-only host source and the
-configured UID/GID mapping; no credentials or source paths enter the image, build
-context or agent settings. It refuses nonempty uninitialized volumes and does
-nothing if already initialized. Partial copies remain uninitialized and require
-operator cleanup. It never automatically overwrites or synchronizes host changes.
+The helper deliberately copies **only**:
+
+```text
+agent/auth.json       # Exact credentials, when present
+agent/settings.json   # Filtered portable preferences, when present
+```
+
+Portable preferences include provider/model/thinking selection, model patterns,
+transport/timeouts, retry/compaction/branch-summary preferences and telemetry
+choices. Unknown settings, package/resource declarations, shell commands, proxies,
+host paths and trust decisions are omitted. The settings allowlist is explicit in
+[`examples/seed-pi-config.mjs`](examples/seed-pi-config.mjs). `models.json`,
+`models-store.json`, MCP configuration, instructions, sessions, installed packages,
+extensions, skills, caches and todo databases are **not copied**. Supply custom
+model configuration separately if your provider needs it. At least one of auth or
+settings must exist. Symlinked agent directories/files and malformed JSON are
+rejected without printing credential contents.
+
+It runs a temporary network-disabled, no-pull container with read-only source/
+helper mounts and the configured UID/GID mapping; credentials never enter an
+image/build context or agent settings. Volume/agent directories are mode 0700;
+files are mode 0600. An internal `.agentorg-seeded` marker records initialization.
+It refuses nonempty uninitialized volumes and does nothing if already initialized,
+including older full-directory snapshots: **it never silently prunes or replaces
+existing data**. Recreate an old volume explicitly using the operator reset
+procedure below to switch to the minimal layout. Partial copies remain
+uninitialized and require operator cleanup. Host changes are never synchronized
+or overwritten automatically.
+
+`sh examples/pi/build.sh --seed-volume NAME [podman build options...]` builds the
+image first, creates the named volume if absent, then runs this same minimal seed
+helper. Without `--seed-volume`, image builds never read/copy host credentials.
+`PODMAN` selects the engine command; `AGENTORG_PODMAN_IMAGE` selects the image tag.
 
 In the TUI, add the volume to `readOnlyVolumes` or `readWriteVolumes`. For a newly
 discovered volume it asks for an absolute **container** destination, e.g.
@@ -514,11 +543,18 @@ into the image or grant supported external resource directories explicitly.
 bun install --frozen-lockfile
 bun run check
 bun test                    # deterministic ACP + fake Podman, no model calls
+bun run test:seed:podman     # real rootless minimal seeding; requires the local example image
 bun run test:podman          # real rootless Podman; builds a temporary fixture image
 bun run test:tui             # requires adjacent agentorg_tui + its dependencies, script and stty
 # After building the example image (startup + native MCP only; no model calls):
 ORG_PODMAN_PI_IMAGE=localhost/agentorg-pi:latest bun test tests/pi-image.test.ts
 ```
+
+Minimal-seeding tests verify the file/settings allowlists, private modes,
+credential-safe errors, symlink/malformed-input rejection, idempotence, no-pull/
+offline mounts and opt-in build/seed orchestration. `test:seed:podman` repeats the
+seed with fake credentials in a disposable **real rootless** volume; it never
+reads host credentials. `ORG_PODMAN_IMAGE` selects its trusted local image.
 
 Server-settings tests cover client/agent authorization, schema/policy validation,
 no probes on reads, local-image checks before changed catalog saves, named

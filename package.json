@@ -8,6 +8,7 @@
     "test": "bun test",
     "build": "bun build src/index.ts --target=bun --outfile dist/index.js && bun build src/mcp.ts --compile --outfile dist/agentorg-podman-mcp && bun build src/entrypoint.ts --compile --outfile dist/agentorg-podman-exec",
     "test:podman": "ORG_PODMAN_TEST=1 bun test tests/podman.test.ts",
+    "test:seed:podman": "ORG_PODMAN_SEED_TEST=1 bun test tests/seed-volume.test.ts",
     "test:tui": "ORG_PODMAN_TUI_TEST=1 bun test tests/settings-ui.test.ts"
   },
   "dependencies": { "zod": "^4.3.6", "@modelcontextprotocol/sdk": "1.32.1" },
