@@ -7,11 +7,11 @@ export class ApiError extends Error {
   constructor(public code: string, message: string) { super(message); }
 }
 export const networkSchema = z.enum(["pasta", "slirp4netns", "none"]);
-export const harnessEnvSchema = z.array(z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/)).max(128)
-  .refine(names => new Set(names).size === names.length, "Duplicate harness variable names");
+export const envSchema = z.array(z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/)).max(128)
+  .refine(names => new Set(names).size === names.length, "Duplicate environment variable names");
 export const containerRuntimeSchema = z.object({
   network: networkSchema, containerUid: z.number().int().min(1).max(65535), containerGid: z.number().int().min(1).max(65535),
-  harnessEnv: harnessEnvSchema.optional(),
+  env: envSchema.optional(),
 }).strict();
 export const containerSettingsSchema = z.object({
   profile: z.object({ id: z.string().min(1).max(128), name: z.string().min(1).max(128), revision: z.number().int().nonnegative() }).strict().optional(),

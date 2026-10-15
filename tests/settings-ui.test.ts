@@ -134,10 +134,10 @@ test.skipIf(process.env.ORG_PODMAN_TUI_TEST !== "1")("real TUI discovers Podman 
     keys("\x1b[B".repeat(5) + "z"); await visible("[0 entries; edit to inspect] · reset draft");
     keys("S"); await visible("Confirm server-wide"); keys("y"); await visible("revision 3");
     expect((await group()).restartRequired).toEqual([]); expect((await group()).overridden).toEqual(["network"]);
-    keys("\x1b[B".repeat(4) + "\r"); await visible("Edit Harness variable names");
+    keys("\x1b[B".repeat(4) + "\r"); await visible("Edit Environment variables");
     keys("d"); await visible("ORG_PI_MCP_SERVERS"); keys("S"); await visible("[3 entries; edit to inspect] · edited draft");
     keys("S"); await visible("Confirm server-wide"); keys("y"); await visible("revision 4");
-    expect((await group()).effective.harnessEnv).toEqual(["ORG_PI_MCP_SERVERS", "ORG_PI_EXTENSION", "AGENTORG_SKILL_FILES"]);
+    expect((await group()).effective.env).toEqual(["ORG_PI_MCP_SERVERS", "ORG_PI_EXTENSION", "AGENTORG_SKILL_FILES"]);
     expect(existsSync(join(dir, "config.json"))).toBe(false); // Server configuration is not a client preference.
   } finally { await ui?.close(); client?.close(); await server?.close(); rmSync(dir, { recursive: true, force: true }); }
 }, 25_000);

@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type { ServerSettingsDefinition } from "agent-organization/plugin";
-import { ApiError, containerSettingsSchema, harnessEnvSchema, networkSchema, parseSettings } from "./policy.ts";
+import { ApiError, containerSettingsSchema, envSchema, networkSchema, parseSettings } from "./policy.ts";
 import { profilesSchema, profileFields } from "./profiles.ts";
 import { validateVolumeDestination, volumeConfigSchema } from "./volumes.ts";
 
@@ -21,7 +21,7 @@ export const configSchema = z.object({
   /** Legacy operator destination policy, not grants. Retained for pins/backward compatibility. */
   volumes: volumeConfigSchema,
   /** Names only: trusted harness variables, never host environment or credentials. */
-  harnessEnv: harnessEnvSchema,
+  env: envSchema,
 }).strict();
 export type PodmanConfig = z.output<typeof configSchema>;
 export type PodmanPluginOptions = Partial<z.input<typeof configSchema>>;
@@ -33,7 +33,7 @@ const builtins: PodmanConfig = {
   entrypointExecutable: "/usr/local/bin/agentorg-podman-exec",
   containerUid: 1000, containerGid: 1000, network: "pasta", volumes: {}, containers: [],
   readOnlyDirs: [], readWriteDirs: [], readOnlyVolumes: [], readWriteVolumes: [],
-  harnessEnv: ["ORG_PI_CONFIG", "ORG_PI_MCP_SERVERS", "ORG_PI_EXTENSION", "AGENTORG_SKILL_FILES"],
+  env: ["ORG_PI_CONFIG", "ORG_PI_MCP_SERVERS", "ORG_PI_EXTENSION", "AGENTORG_SKILL_FILES"],
 };
 
 /** Pure syntax/policy validation. No Podman commands, image probes or mount I/O. */
@@ -58,7 +58,7 @@ export function grantDefaults(config: PodmanConfig) {
 
 export function podmanServerSettings(defaults: PodmanConfig): ServerSettingsDefinition {
   return {
-    namespace: "podman", title: "Podman containers", version: 3,
+    namespace: "podman", title: "Podman containers", version: 4,
     description: "Named container configurations selectable when creating agents, plus server-wide defaults. No credentials or automatic restarts.",
     defaults,
     fields: [
@@ -70,8 +70,8 @@ export function podmanServerSettings(defaults: PodmanConfig): ServerSettingsDefi
         description: "Non-root image user ID. keep-id maps the server user to this ID for new containers; must match the image." },
       { key: "containerGid", label: "Container GID", editor: "number", min: 1, max: 65535, effect: "future-launch",
         description: "Non-root image group ID for new containers; must match the image." },
-      { key: "harnessEnv", label: "Harness variable names", editor: "list", effect: "future-launch",
-        description: "Unique environment variable NAMES permitted from trusted harness launch specs. No values or credentials here. This never copies the host environment; the generation token is always removed." },
+      { key: "env", label: "Environment variables", editor: "list", effect: "future-launch",
+        description: "Environment variable NAMES permitted from trusted harness launch specs. Values come from that harness, not the host environment; the generation token is always removed." },
       ...profileFields.filter(field => ['readOnlyDirs', 'readWriteDirs', 'readOnlyVolumes', 'readWriteVolumes'].includes(field.key)).map(field => ({ ...field,
         description: 'Seed new client-created agent drafts and new container configurations; review before saving. Does not change existing agents/configurations or agent-created child grants. Removing defaults never deletes data or volume registrations.' })),
       { key: "volumes", label: "Legacy volume destination policy", editor: "object-map", effect: "restart", deprecated: true,
@@ -83,13 +83,13 @@ export function podmanServerSettings(defaults: PodmanConfig): ServerSettingsDefi
       { key: "entrypointExecutable", label: "Container mount-gate executable", editor: "text", effect: "restart",
         description: "Trusted mount-identity gate installed inside images. Effective only after server restart; images must provide a compatible gate." },
       { key: "containers", label: "Container configurations", editor: "list", effect: "future-launch",
-        description: "Add named configurations, then select one when creating an agent. Local image availability is checked on save; harness capability probes are not yet implemented. Mount security is checked on agent creation/launch.",
+        description: "Add named container configurations, then select one when creating an agent. Harness, provider and model remain harness-owned. Local image availability is checked on save; mount security is checked on agent creation/launch.",
         itemFields: profileFields, itemIdKey: "id", itemLabelKey: "name",
-        itemDefaultsFrom: { image: 'defaultImage', network: 'network', containerUid: 'containerUid', containerGid: 'containerGid', harnessEnv: 'harnessEnv',
+        itemDefaultsFrom: { image: 'defaultImage', network: 'network', containerUid: 'containerUid', containerGid: 'containerGid', env: 'env',
           readOnlyDirs: 'readOnlyDirs', readWriteDirs: 'readWriteDirs', readOnlyVolumes: 'readOnlyVolumes', readWriteVolumes: 'readWriteVolumes' },
         itemDefaults: { id: "", name: "New container", image: defaults.defaultImage, network: defaults.network,
-          containerUid: defaults.containerUid, containerGid: defaults.containerGid, harnessEnv: defaults.harnessEnv,
-          harness: "", provider: "", model: "", cwd: "", ...grantDefaults(defaults) } },
+          containerUid: defaults.containerUid, containerGid: defaults.containerGid, env: defaults.env,
+          cwd: "", ...grantDefaults(defaults) } },
     ],
     validate: value => validateConfig(value),
     migrate(overrides, fromVersion) { if (![1, 2].includes(fromVersion)) throw new Error("Unsupported Podman settings version"); return overrides; },

@@ -188,8 +188,9 @@ observe a changed ancestor image on their next explicit restart.
 Configure reusable containers through **v → s → Podman containers → Container
 configurations**. Press **a** to add, Enter to edit, or **d** to remove a named
 configuration. The entry opens a field form—no raw JSON object is required.
-Choose an image from the server's local Podman store, choose network, UID/GID,
-harness defaults, working directory and explicit RO/RW directory/volume defaults.
+Choose an image from the server's local Podman store, network, UID/GID,
+allowed environment variable names, working directory and explicit RO/RW
+directory/volume defaults.
 New entries seed runtime defaults from the current settings draft, not stale
 startup values. Environment values/credentials and arbitrary secret-bearing
 harness options are deliberately not configuration fields.
@@ -205,16 +206,15 @@ helper must be installed on the server. `slirp4netns` disables host loopback.
 Press **S** to stage the entry into its list, **S** to stage the list into the
 server draft, then **S** and confirm the server-wide save. Names, IDs, public
 values and grant syntax are validated before saving. Changed catalogs also check
-that image references exist **locally** (without pulling) and any explicit
-harness names are loaded. This is not a mount test or an in-container capability
-probe: provider/model defaults remain manual, and image/runtime/adapter
-compatibility is still ultimately checked on launch. Capability-driven model and
-option discovery remains a follow-up.
+that image references exist **locally** (without pulling). This is not a mount
+test or an in-container capability probe: image/runtime/adapter compatibility
+is ultimately checked on launch.
 
 When creating an agent (**n**), open **Container configuration** and select the
 saved entry. Its image, runtime settings, cwd and grant defaults populate the
-**draft** for review. Selecting a different entry clears/replaces stale provider/
-model choices. Review cwd coverage and every grant before saving; the usual
+**draft** for review. Harness, provider, model and options remain owned by the
+selected harness plugin and are not changed by the container profile. Review cwd
+coverage and every grant before saving; the usual
 launch-time protection, normalization and delegation checks remain authoritative.
 The image field also has a live local-image picker (`m` for manual/inherited
 entry). Older servers without these capabilities retain manual editing.
@@ -231,9 +231,9 @@ selection and runtime changes are client-only, with no MCP management tool.
 API discovery advertises `plugins.podman.endpoints.profiles` and `.images`:
 `podman.profiles {}` returns `{revision, profiles}`. Catalog entries live in the
 shared core-owned `organization.settings.get/update` group `podman`, field
-`containers`, with version-1/2 settings migrated to version 3. Each entry has
-`id`, `name`, `image`, `network`, `containerUid`, `containerGid`, `harnessEnv`
-(variable names only), `harness`, `provider`, `model`, `cwd`, `readOnlyDirs`,
+`containers`, with settings schema version 4. Each entry has
+`id`, `name`, `image`, `network`, `containerUid`, `containerGid`, `env`
+(allowed variable names), `cwd`, `readOnlyDirs`,
 `readWriteDirs`, `readOnlyVolumes`, and `readWriteVolumes`. The core still owns
 persistence, revisions, reset, authorization and atomic change events.
 
@@ -271,7 +271,7 @@ or edit the settings API, and no settings MCP tool is provided.
 | `defaultImage` | Future launches/restarts without an explicit ancestor image |
 | `network` (`pasta`, `slirp4netns`, `none`) | Future launches |
 | `containerUid`, `containerGid` (integers 1–65535) | Future launches |
-| `harnessEnv` (unique variable **names**, not values) | Future launches |
+| `env` (unique variable **names**, not values) | Future launches |
 | `containers` (named configurations) | Newly selected agent drafts; existing snapshots unchanged |
 | `readOnlyDirs`, `readWriteDirs` | New agent drafts / new configurations |
 | `readOnlyVolumes`, `readWriteVolumes` | New agent drafts / new configurations |
@@ -321,9 +321,8 @@ execute availability checks. Changed configuration catalogs inspect local images
 before committing; they never pull images or test mounts. Host executable
 existence/rootless checks run at initialization; image/helper compatibility is
 checked on launch. In-container capability probes are not implemented yet.
-No environment values, credentials, volume contents or host volume mountpoints
-are settings fields. `harnessEnv` names
-select values from trusted harness specs only, never ambient host variables; the
+`env` contains allowed variable names, not values or credentials. It selects
+values from trusted harness launch specs only, never ambient host variables; the
 generation token is always stripped.
 
 The four defaults are independent lists. For example, a settings patch can contain:
@@ -371,10 +370,10 @@ export default createPodmanPlugin({
 user, so bind mounts retain that user's host access. Change these numbers for
 images with another non-root user. The image's ACP harness uses its own environment
 plus explicit `settings.env`; host HOME, provider tokens, and other ambient
-variables are not copied. Trusted harness environment contracts default to
+variables are not copied. The `env` allowlist defaults to
 `ORG_PI_CONFIG`, `ORG_PI_MCP_SERVERS`, `ORG_PI_EXTENSION` and `AGENTORG_SKILL_FILES`;
-custom adapters can configure `harnessEnv`. Plugin-provided launch environment is
-also trusted. Optional `mcpExecutable`/`entrypointExecutable` configure image
+operators can configure additional names. Only values supplied by the harness
+launch spec are passed through. Optional `mcpExecutable`/`entrypointExecutable` configure image
 helper locations. No arbitrary Podman flags are accepted from agent settings.
 
 ## Persistent harness volumes

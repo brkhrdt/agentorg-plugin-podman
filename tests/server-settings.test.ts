@@ -65,7 +65,7 @@ const bootstrap = (run: string[]) => JSON.parse(run[run.indexOf("--entrypoint") 
 test("Podman declares public server fields; validation/auth are authoritative and reads/saves do not probe", async () => {
   const f = await fixture();
   const group = await f.group();
-  expect(group.plugin).toBe("podman"); expect(group.version).toBe(3); expect(group.revision).toBe(0);
+  expect(group.plugin).toBe("podman"); expect(group.version).toBe(4); expect(group.revision).toBe(0);
   expect(group.fields.map(field => field.key).sort()).toEqual(Object.keys(group.defaults).sort());
   expect(group.fields.filter(field => field.effect === "restart").map(field => field.key).sort())
     .toEqual(["volumes", "podmanExecutable", "mcpExecutable", "entrypointExecutable"].sort());
@@ -77,11 +77,11 @@ test("Podman declares public server fields; validation/auth are authoritative an
   const snapshot: any = await f.client.request("organization.snapshot");
   expect(snapshot.capabilities.serverSettings.groups.find((g: any) => g.namespace === "podman").fields).toEqual(group.fields);
   expect(snapshot.capabilities.plugins.podman.serverSettingsNamespace).toBe("podman");
-  group.values.harnessEnv = ["MUTATED"]; expect((await f.group()).values.harnessEnv).not.toEqual(["MUTATED"]);
+  group.values.env = ["MUTATED"]; expect((await f.group()).values.env).not.toEqual(["MUTATED"]);
   const commandCount = f.commands().length;
   const invalid = [
     { defaultImage: "--option" }, { defaultImage: "two images" }, { containerUid: 0 }, { containerGid: 65536 }, { containerUid: 1.5 },
-    { network: "host" }, { harnessEnv: ["invalid=name"] }, { harnessEnv: ["A", "A"] }, { harnessEnv: [3] },
+    { network: "host" }, { env: ["invalid=name"] }, { env: ["A", "A"] }, { env: [3] },
     { podmanExecutable: "-bad" }, { mcpExecutable: "x\0y" }, { entrypointExecutable: "" },
     { readOnlyDirs: ['/same'], readWriteDirs: ['/same'] }, { readOnlyDirs: [''] },
     { readOnlyVolumes: ['pi'], readWriteVolumes: ['pi'] }, { readWriteVolumes: ['--bad'] },
@@ -119,7 +119,7 @@ test("future-launch changes affect subsequent containers without restarting agen
   const events: ServerEvent[] = []; peer.onEvent(event => { if (event.type === "organization.settings.changed") events.push(event); });
   await peer.request("subscribe", { types: ["organization.settings.changed"] });
   try {
-    const saved = await f.update({ defaultImage: "test:v2", network: "none", containerUid: 2000, containerGid: 2001, harnessEnv: ["PUBLIC_CONFIG"] });
+    const saved = await f.update({ defaultImage: "test:v2", network: "none", containerUid: 2000, containerGid: 2001, env: ["PUBLIC_CONFIG"] });
     expect(saved.restartRequired).toEqual([]); expect(saved.effective).toEqual(saved.values);
     expect(await peer.request<ServerSettingsView>("organization.settings.get", { namespace: "podman" })).toEqual(saved);
     expect(f.runs()).toHaveLength(1);
@@ -135,7 +135,7 @@ test("future-launch changes affect subsequent containers without restarting agen
     const revision = saved.revision;
     await expect(peer.request("organization.settings.update", { namespace: "podman", expectedRevision: 0, patch: { network: "pasta" } })).rejects.toMatchObject({ code: "CONFLICT" });
     expect((await f.update({ network: "none" })).revision).toBe(revision); // No-op save.
-    expect((await f.update({}, ["defaultImage", "network", "containerUid", "containerGid", "harnessEnv"])).overridden).toEqual([]);
+    expect((await f.update({}, ["defaultImage", "network", "containerUid", "containerGid", "env"])).overridden).toEqual([]);
     expect((await f.mutate("agent.restart", { agentId: root.id })).status).toBe("completed");
     const resetRun = f.runs().at(-1)!;
     expect(resetRun).toContain("test:v1"); expect(resetRun).toContain("--userns=keep-id:uid=1000,gid=1000");
@@ -206,7 +206,7 @@ test("named configurations validate local images, persist, and snapshot runtime/
   const f = await fixture();
   const defaults = (await f.group()).fields.find(field => field.key === 'containers')!.itemDefaults!;
   const profile = { ...defaults, id: 'coding', name: 'Coding', image: 'test:v1', network: 'none', containerUid: 2200, containerGid: 2201,
-    harness: 'fixture', cwd: f.workspace, readWriteDirs: [f.workspace] };
+    cwd: f.workspace, env: defaults.env as string[], readWriteDirs: [f.workspace] };
   const before = (await f.group()).revision;
   await expect(f.update({ containers: [{ ...profile, image: 'missing:latest' }] })).rejects.toMatchObject({ code: 'INVALID_PARAMS' });
   expect((await f.group()).revision).toBe(before);
@@ -218,7 +218,7 @@ test("named configurations validate local images, persist, and snapshot runtime/
   const createFrom = (parentId: string | null, selected: typeof profile, revision: number) => f.mutate('agent.create', { parentId,
     settings: { harness: 'fixture', cwd: f.workspace, extensions: { podman: {
       image: selected.image, readWriteDirs: [f.workspace], profile: { id: selected.id, name: selected.name, revision },
-      runtime: { network: selected.network, containerUid: selected.containerUid, containerGid: selected.containerGid, harnessEnv: defaults.harnessEnv },
+      runtime: { network: selected.network, containerUid: selected.containerUid, containerGid: selected.containerGid, env: selected.env },
     } } } });
   const creation = await createFrom(null, profile, saved.revision); expect(creation.status).toBe('completed');
   const root = creation.result as AgentRecord;
@@ -235,7 +235,7 @@ test("named configurations validate local images, persist, and snapshot runtime/
   expect(f.runs().at(-1)).toContain('test:v1'); expect(f.runs().at(-1)).toContain('--userns=keep-id:uid=2200,gid=2201');
   // Unconfigured children inherit the parent's frozen runtime, but no grants.
   expect((await f.create(root.id)).status).toBe('completed'); expect(f.runs().at(-1)).toContain('--userns=keep-id:uid=2200,gid=2201');
-  for (const method of ['podman.profiles', 'podman.choices.images', 'podman.choices.harnesses', 'podman.choices.volumes.ro', 'podman.choices.volumes.defaults', 'podman.defaults'])
+  for (const method of ['podman.profiles', 'podman.choices.images', 'podman.choices.volumes.ro', 'podman.choices.volumes.defaults', 'podman.defaults'])
     await expect(f.server.organization.request(method, {}, { kind: 'agent', id: root.id })).rejects.toMatchObject({ code: 'FORBIDDEN' });
   await f.restart(); expect((await f.group()).values.containers).toEqual([]);
 }, 25_000);
@@ -250,7 +250,7 @@ test.each([1, 2])("version-%i settings migrate additively without losing operato
   f.server.organization.store.saveServerSettings({ ...record, version });
   await f.restart();
   const migrated = await f.group();
-  expect(migrated.version).toBe(3); expect(migrated.revision).toBe(record.revision + 1);
+  expect(migrated.version).toBe(4); expect(migrated.revision).toBe(record.revision + 1);
   expect(migrated.values.network).toBe('none'); expect(migrated.values.containers).toEqual([]); expect(migrated.values.volumes).toEqual(policy);
   expect(await f.client.request<any>('podman.defaults', {})).toEqual({ readOnlyDirs: [], readWriteDirs: [], readOnlyVolumes: [], readWriteVolumes: [] });
   expect(readFileSync(join(f.dir, 'data/podman-volume-pins.json'), 'utf8')).toBe(pins);
@@ -262,7 +262,6 @@ test("option catalogs contain public local image tags and exact eligible volume/
   const images = await f.client.request<any>('podman.choices.images', {});
   expect(images.choices).toEqual([{ value: 'test:v1', label: 'test:v1' }, { value: 'test:v2', label: 'test:v2' }]);
   expect(JSON.stringify(images)).not.toContain('DO-NOT-EXPOSE');
-  expect(await f.client.request<any>('podman.choices.harnesses', {})).toEqual({ choices: [{ value: 'fixture', label: 'fixture' }] });
   const defaultOptions = await f.client.request<any>('podman.choices.volumes.defaults', {});
   expect(defaultOptions.choices.find((v: any) => v.value === 'pi')).toEqual({ value: 'pi', label: 'pi → (choose container destination)', defaults: { destination: '', readOnly: false, description: '' } });
   expect(JSON.stringify(defaultOptions)).not.toContain(f.dir);

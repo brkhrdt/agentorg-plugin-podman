@@ -50,9 +50,6 @@ export function createPodmanPlugin(options: PodmanPluginOptions = {}): ServerPlu
     host.registerServerSettings({ ...podmanServerSettings(defaults), async validateChange(next, previous) {
       if (isDeepStrictEqual(next.containers, previous.containers)) return;
       const profiles = validateConfig(next).containers;
-      const snapshot = await host.request('organization.snapshot', {}, serverCaller) as { capabilities: { harnesses: string[] } };
-      if (profiles.some(profile => profile.harness && !snapshot.capabilities.harnesses.includes(profile.harness)))
-        throw new ApiError('INVALID_PARAMS', 'Choose a loaded harness for the container configuration');
       const images = [...new Set(profiles.map(profile => profile.image))];
       if (!images.length) return;
       try {
@@ -245,7 +242,7 @@ export function createPodmanPlugin(options: PodmanPluginOptions = {}): ServerPlu
       }
       const container = { ...config, ...runtime };
       const env: Record<string, string | undefined> = { ...settings.env };
-      for (const name of container.harnessEnv) if (spec.env?.[name] !== undefined) env[name] = spec.env[name];
+      for (const name of container.env) if (spec.env?.[name] !== undefined) env[name] = spec.env[name];
       Object.assign(env, context.env, { ORG_SOCKET: resource.relay.path, ORG_AGENT_ID: context.agent.id });
       // The generation token remains exclusively on the host, even if supplied in settings.env.
       delete env.ORG_TOKEN;
@@ -326,11 +323,6 @@ export function createPodmanPlugin(options: PodmanPluginOptions = {}): ServerPlu
         }
         return { choices: [...choices].sort(([a], [b]) => a.localeCompare(b)).map(([value, label]) => ({ value, label })) };
       } catch { throw new ApiError("UNAVAILABLE", "Could not discover local Podman images"); }
-    });
-    host.registerEndpoint("podman.choices.harnesses", async (input, caller) => {
-      clientOnly(caller); z.object({}).strict().parse(input ?? {});
-      const state = await host.request("organization.snapshot", {}, serverCaller) as { capabilities: { harnesses: string[] } };
-      return { choices: state.capabilities.harnesses.map(value => ({ value, label: value })) };
     });
     host.registerEndpoint("podman.choices.volumes.defaults", async (input, caller) => {
       clientOnly(caller); z.object({}).strict().parse(input ?? {});
