@@ -213,7 +213,8 @@ export function createPodmanPlugin(options: PodmanPluginOptions = {}): ServerPlu
       await normalized(context.agent.settings, context.agent, true);
       const agent = context.agent;
       const key = agent.generation!;
-      const name = `aop-${owner}-${key}`;
+      const slug = agent.name.toLowerCase().normalize("NFKD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 48).replace(/-+$/g, "") || "agent";
+      const name = `agentorg-${slug}-${owner}-${key}`;
       const relay = await createRelay(context.socketPath, context.token);
       protectedPaths.push(dirname(relay.path));
       resources.set(key, { agentId: agent.id, name, relay });

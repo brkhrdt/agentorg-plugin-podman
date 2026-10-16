@@ -63,7 +63,7 @@ test.skipIf(process.env.ORG_PODMAN_TEST !== "1")("real rootless Podman: OS-enfor
     const childWork = await run("agent.prompt", { agentId: child.id, text: JSON.stringify({ read: { parentRw: join(rw, "new"), parentSession: join(session, "test"), shared: '/home/pi/.pi/shared' }, write: { volumeDenied: '/home/pi/.pi/child', denied: join(ro, "child-write") } }) });
     expect(JSON.parse((childWork.result as { text: string }).text)).toMatchObject({ parentRw: "ENOENT", parentSession: "ENOENT", denied: "EROFS", shared: 'container-write', volumeDenied: 'EROFS' });
     const running = (await exec("podman", ["ps", "--format", "{{.Names}}"])).stdout;
-    expect(running.split("\n").filter(n => n.startsWith("aop-")).length).toBeGreaterThanOrEqual(2);
+    expect(running.split("\n").filter(n => n.startsWith("agentorg-")).length).toBeGreaterThanOrEqual(2);
     expect((await run('agent.restart', { agentId: root.id })).status).toBe('completed');
     const restarted = await run('agent.prompt', { agentId: root.id, text: JSON.stringify({ read: { shared: '/home/pi/.pi/shared' } }) });
     expect(JSON.parse((restarted.result as { text: string }).text).shared).toBe('container-write');

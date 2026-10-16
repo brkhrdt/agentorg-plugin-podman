@@ -58,6 +58,7 @@ test("every launch is wrapped, grants are explicit, only private session and MCP
     { key: "readWriteVolumes", label: "Read/write volumes", editor: "list" },
   ] });
   const run = runs()[0]!;
+  expect(run[run.indexOf("--name") + 1]).toMatch(/^agentorg-agent-[a-f0-9]{20}-[a-f0-9-]{36}$/);
   expect(run).toContain("--userns=keep-id:uid=1000,gid=1000"); expect(run).toContain("--cap-drop=ALL");
   expect(run).toContain("--security-opt=no-new-privileges"); expect(run).toContain("test:v1");
   expect(run.some(a => a.startsWith("HOST_SECRET="))).toBe(false);
