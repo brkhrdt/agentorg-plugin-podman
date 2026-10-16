@@ -3,7 +3,7 @@ import type { ServerSettingsField } from "agent-organization/plugin";
 import { containerRuntimeSchema, envSchema, networkSchema, parseSettings } from "./policy.ts";
 
 export const containerProfileSchema = z.object({
-  id: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]*$/).max(128), name: z.string().trim().min(1).max(128),
+  id: z.string().regex(/^(?!default$)[A-Za-z0-9][A-Za-z0-9_-]*$/).max(128), name: z.string().trim().min(1).max(128),
   image: z.string().min(1).max(4096).refine(value => !value.startsWith("-") && !/[\s\0]/.test(value), "Invalid image reference"),
   network: networkSchema, containerUid: containerRuntimeSchema.shape.containerUid, containerGid: containerRuntimeSchema.shape.containerGid,
   env: envSchema,

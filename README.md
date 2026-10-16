@@ -210,26 +210,28 @@ that image references exist **locally** (without pulling). This is not a mount
 test or an in-container capability probe: image/runtime/adapter compatibility
 is ultimately checked on launch.
 
-When creating an agent (**n**), open **Container configuration** and select the
-saved entry. Its image, runtime settings, cwd and grant defaults populate the
-**draft** for review. Harness, provider, model and options remain owned by the
-selected harness plugin and are not changed by the container profile. Review cwd
-coverage and every grant before saving; the usual
-launch-time protection, normalization and delegation checks remain authoritative.
-The image field also has a live local-image picker (`m` for manual/inherited
-entry). Older servers without these capabilities retain manual editing.
+When creating or editing an agent, choose its **Container** from the existing
+configurations. **Default** is always available and uses the current server-wide
+image/runtime/grant defaults; named choices use their saved values. There is no
+separate agent image picker or manual container choice. The selection populates
+the draft, including image, runtime, cwd (when configured) and grant defaults.
+Harness, provider, model and options remain harness-owned. Review cwd coverage
+and grants before saving; launch-time protection and delegation checks remain
+authoritative. Older servers without these capabilities retain their legacy editor.
 
-Creation persists a detached runtime/image/grant snapshot plus configuration ID,
-name and catalog revision in `settings.extensions.podman`. A stale/deleted
+Creation persists a detached runtime/image/configured-mount snapshot plus
+configuration ID, name and catalog revision in `settings.extensions.podman`.
+Configured directories and volumes are mounted in every descendant container
+that inherits that configuration, regardless of the child's requested grants;
+ordinary per-agent extra mounts are not implicitly inherited. A stale/deleted
 selection before creation returns `CONFLICT`: select it again, don't blindly
-retry. Editing/resetting/deleting a catalog entry never rewrites or restarts
-existing agents. Their snapshots remain usable even after the entry disappears;
-per-agent grant edits preserve those snapshots. Children inherit an ancestor's
-explicit image/runtime, **never its filesystem or volume grants**. Configuration
-selection and runtime changes are client-only, with no MCP management tool.
+retry. Editing/resetting/deleting a catalog entry never rewrites existing agent
+snapshots. Configuration selection and runtime changes are client-only, with no
+MCP management tool.
 
 API discovery advertises `plugins.podman.endpoints.profiles` and `.images`:
-`podman.profiles {}` returns `{revision, profiles}`. Catalog entries live in the
+`podman.profiles {}` returns `{revision, profiles}`, including a synthetic `default`
+choice built from current server-wide defaults. Named catalog entries live in the
 shared core-owned `organization.settings.get/update` group `podman`, field
 `containers`, with settings schema version 4. Each entry has
 `id`, `name`, `image`, `network`, `containerUid`, `containerGid`, `env`

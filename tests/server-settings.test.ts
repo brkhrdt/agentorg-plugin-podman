@@ -204,17 +204,21 @@ test("restart-only paths and volume defaults persist over module defaults and st
 
 test("named configurations validate local images, persist, and snapshot runtime/grants into agents independently of later catalog edits", async () => {
   const f = await fixture();
+  await f.client.request('podman.volume.configure', { name: 'pi', destination: '/home/pi/.pi' });
   const defaults = (await f.group()).fields.find(field => field.key === 'containers')!.itemDefaults!;
   const profile = { ...defaults, id: 'coding', name: 'Coding', image: 'test:v1', network: 'none', containerUid: 2200, containerGid: 2201,
-    cwd: f.workspace, env: defaults.env as string[], readWriteDirs: [f.workspace] };
+    cwd: f.workspace, env: defaults.env as string[], readWriteDirs: [f.workspace], readOnlyVolumes: ['pi'] };
   const before = (await f.group()).revision;
   await expect(f.update({ containers: [{ ...profile, image: 'missing:latest' }] })).rejects.toMatchObject({ code: 'INVALID_PARAMS' });
   expect((await f.group()).revision).toBe(before);
   await expect(f.update({ containers: [{ ...profile, env: { TOKEN: 'not-allowed' } }] })).rejects.toMatchObject({ code: 'INVALID_PARAMS' });
   await expect(f.update({ containers: [profile, profile] })).rejects.toMatchObject({ code: 'INVALID_PARAMS' });
+  await expect(f.update({ containers: [{ ...profile, id: 'default' }] })).rejects.toMatchObject({ code: 'INVALID_PARAMS' });
   const saved = await f.update({ containers: [profile] });
   const catalog = await f.client.request<any>('podman.profiles', {});
-  expect(catalog).toEqual({ revision: saved.revision, profiles: [profile] });
+  expect(catalog.revision).toBe(saved.revision);
+  expect(catalog.profiles).toEqual([{ id: 'default', name: 'Default', image: 'test:v1', network: 'pasta', containerUid: 1000, containerGid: 1000,
+    env: ['ORG_PI_CONFIG', 'ORG_PI_MCP_SERVERS', 'ORG_PI_EXTENSION', 'AGENTORG_SKILL_FILES'], cwd: '', readOnlyDirs: [], readWriteDirs: [], readOnlyVolumes: [], readWriteVolumes: [] }, profile]);
   const createFrom = (parentId: string | null, selected: typeof profile, revision: number) => f.mutate('agent.create', { parentId,
     settings: { harness: 'fixture', cwd: f.workspace, extensions: { podman: {
       image: selected.image, readWriteDirs: [f.workspace], profile: { id: selected.id, name: selected.name, revision },
@@ -233,8 +237,10 @@ test("named configurations validate local images, persist, and snapshot runtime/
   await f.update({ containers: [] });
   expect((await f.mutate('agent.restart', { agentId: root.id })).status).toBe('completed');
   expect(f.runs().at(-1)).toContain('test:v1'); expect(f.runs().at(-1)).toContain('--userns=keep-id:uid=2200,gid=2201');
-  // Unconfigured children inherit the parent's frozen runtime, but no grants.
-  expect((await f.create(root.id)).status).toBe('completed'); expect(f.runs().at(-1)).toContain('--userns=keep-id:uid=2200,gid=2201');
+  // Children inherit the selected container's configured mounts even without requesting them.
+  expect((await f.create(root.id)).status).toBe('completed');
+  expect(f.runs().at(-1)).toContain('--userns=keep-id:uid=2200,gid=2201');
+  expect(f.runs().at(-1)).toContain('pi:/home/pi/.pi:ro,nocopy');
   for (const method of ['podman.profiles', 'podman.choices.images', 'podman.choices.volumes.ro', 'podman.choices.volumes.defaults', 'podman.defaults'])
     await expect(f.server.organization.request(method, {}, { kind: 'agent', id: root.id })).rejects.toMatchObject({ code: 'FORBIDDEN' });
   await f.restart(); expect((await f.group()).values.containers).toEqual([]);

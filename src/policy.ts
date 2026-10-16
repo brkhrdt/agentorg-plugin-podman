@@ -13,8 +13,15 @@ export const containerRuntimeSchema = z.object({
   network: networkSchema, containerUid: z.number().int().min(1).max(65535), containerGid: z.number().int().min(1).max(65535),
   env: envSchema.optional(),
 }).strict();
+const grantSetSchema = z.object({
+  readOnlyDirs: z.array(z.string().min(1)).max(128).default([]), readWriteDirs: z.array(z.string().min(1)).max(128).default([]),
+  readOnlyVolumes: z.array(z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.-]*$/).max(128)).max(128).default([]),
+  readWriteVolumes: z.array(z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.-]*$/).max(128)).max(128).default([]),
+}).strict().refine(settings => new Set([...settings.readOnlyVolumes, ...settings.readWriteVolumes]).size === settings.readOnlyVolumes.length + settings.readWriteVolumes.length, "Duplicate or conflicting container configuration volumes");
 export const containerSettingsSchema = z.object({
   profile: z.object({ id: z.string().min(1).max(128), name: z.string().min(1).max(128), revision: z.number().int().nonnegative() }).strict().optional(),
+  /** Immutable mount set supplied by the selected/inherited container configuration. */
+  configGrants: grantSetSchema.optional(),
   runtime: containerRuntimeSchema.optional(),
   image: z.string().min(1).refine(s => !s.startsWith("-") && !/\s|\0/.test(s), "Invalid image reference").nullable().optional(),
   readOnlyDirs: z.array(z.string().min(1)).max(128).default([]),
@@ -67,7 +74,14 @@ export async function normalize(value: unknown, base: string): Promise<Container
   const readOnlyDirs = await canonical(settings.readOnlyDirs);
   const readWriteDirs = await canonical(settings.readWriteDirs);
   if (readOnlyDirs.some(p => readWriteDirs.includes(p))) throw new ApiError("INVALID_PARAMS", "A directory cannot be both read-only and read/write");
-  return { ...settings, readOnlyDirs, readWriteDirs };
+  let configGrants = settings.configGrants;
+  if (configGrants) {
+    const configuredReadOnlyDirs = await canonical(configGrants.readOnlyDirs);
+    const configuredReadWriteDirs = await canonical(configGrants.readWriteDirs);
+    if (configuredReadOnlyDirs.some(p => configuredReadWriteDirs.includes(p))) throw new ApiError("INVALID_PARAMS", "A container configuration directory cannot be both read-only and read/write");
+    configGrants = { ...configGrants, readOnlyDirs: configuredReadOnlyDirs, readWriteDirs: configuredReadWriteDirs };
+  }
+  return { ...settings, readOnlyDirs, readWriteDirs, ...(configGrants && { configGrants }) };
 }
 export function roots(settings: ContainerSettings): string[] {
   return [...settings.readOnlyDirs, ...settings.readWriteDirs];

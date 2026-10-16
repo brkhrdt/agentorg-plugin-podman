@@ -31,6 +31,34 @@ export function effectiveImage(agent: Readonly<AgentRecord>, agents: Readonly<Ag
   }
   return fallback;
 }
+function configuredGrants(agent: Readonly<AgentRecord>, agents: Readonly<AgentRecord>[]) {
+  const seen = new Set<string>();
+  let node: Readonly<AgentRecord> | undefined = agent;
+  while (node) {
+    if (seen.has(node.id)) throw new ApiError("INVALID_PARAMS", "Cycle in agent hierarchy");
+    seen.add(node.id);
+    const settings = parseSettings(node.settings.extensions?.podman);
+    if (settings.configGrants) return settings.configGrants;
+    if (settings.profile) return { readOnlyDirs: settings.readOnlyDirs, readWriteDirs: settings.readWriteDirs,
+      readOnlyVolumes: settings.readOnlyVolumes, readWriteVolumes: settings.readWriteVolumes };
+    node = agents.find(a => a.id === node!.parentId);
+  }
+  return undefined;
+}
+function withConfiguredGrants(settings: ReturnType<typeof parseSettings>, config: NonNullable<ReturnType<typeof configuredGrants>>) {
+  for (const path of [...settings.readOnlyDirs, ...settings.readWriteDirs]) {
+    const configuredPermission = permission(config, path);
+    if (configuredPermission > 0 && configuredPermission < permission(settings, path)) throw new ApiError("FORBIDDEN", `Agent mount exceeds the selected container configuration: ${path}`);
+  }
+  const configuredVolumes = new Set([...config.readOnlyVolumes, ...config.readWriteVolumes]);
+  const readOnlyVolumes = [...new Set([...settings.readOnlyVolumes.filter(name => !configuredVolumes.has(name)), ...config.readOnlyVolumes])];
+  const readWriteVolumes = [...new Set([...settings.readWriteVolumes.filter(name => !configuredVolumes.has(name)), ...config.readWriteVolumes])];
+  const configuredDirs = new Set([...config.readOnlyDirs, ...config.readWriteDirs]);
+  return { ...settings, configGrants: config,
+    readOnlyDirs: [...new Set([...settings.readOnlyDirs.filter(path => !configuredDirs.has(path)), ...config.readOnlyDirs])],
+    readWriteDirs: [...new Set([...settings.readWriteDirs.filter(path => !configuredDirs.has(path)), ...config.readWriteDirs])],
+    readOnlyVolumes, readWriteVolumes };
+}
 export function imageDescendants(agentId: string, agents: Readonly<AgentRecord>[], scope: ImageScope): Readonly<AgentRecord>[] {
   if (scope === "node") return [];
   const result: Readonly<AgentRecord>[] = [];
@@ -130,16 +158,26 @@ export function createPodmanPlugin(options: PodmanPluginOptions = {}): ServerPlu
       const base = parent?.settings.cwd ?? process.cwd();
       if (!settings.cwd) throw new ApiError("INVALID_PARAMS", "Container agents require an explicit cwd covered by a directory mount");
       const cwd = await directory(hostPath(settings.cwd, base));
-      const value = await normalize(settings.extensions?.podman, base);
-      protect(value, protectedPaths);
-      await volumes.validate(value, volumeProtectedPaths(), launch);
-      if (!permission(value, cwd)) throw new ApiError("INVALID_PARAMS", "cwd must be covered by an explicit readOnlyDirs or readWriteDirs mount");
+      let value = await normalize(settings.extensions?.podman, base);
+      if (!launch && !value.configGrants && value.profile) {
+        const config = currentConfig();
+        const selected = value.profile.id === "default" ? { ...grantDefaults(config) } : config.containers.find(item => item.id === value.profile!.id);
+        if (selected) value = await normalize({ ...value, configGrants: {
+          readOnlyDirs: selected.readOnlyDirs, readWriteDirs: selected.readWriteDirs,
+          readOnlyVolumes: selected.readOnlyVolumes, readWriteVolumes: selected.readWriteVolumes,
+        } }, base);
+      }
       if (launch) {
-        // Reject changed symlink targets at recovery/restart, rather than silently expanding access.
+        // Check persisted paths before adding inherited configuration mounts.
         const old = parseSettings(settings.extensions?.podman);
         if (cwd !== settings.cwd || JSON.stringify(value) !== JSON.stringify(old)) throw new ApiError("FORBIDDEN", "Persisted mount/cwd paths changed; update settings through a trusted client");
       }
-      return { ...settings, cwd, extensions: { ...settings.extensions, podman: value } };
+      const configured = value.configGrants ?? configuredGrants(agent, agents);
+      const effective = configured ? withConfiguredGrants(value, configured) : value;
+      protect(effective, protectedPaths);
+      await volumes.validate(effective, volumeProtectedPaths(), launch);
+      if (!permission(effective, cwd)) throw new ApiError("INVALID_PARAMS", "cwd must be covered by an explicit readOnlyDirs or readWriteDirs mount");
+      return { ...settings, cwd, extensions: { ...settings.extensions, podman: effective } };
     }
     host.beforeSettings(normalized);
     host.beforeMutation(async context => {
@@ -147,7 +185,7 @@ export function createPodmanPlugin(options: PodmanPluginOptions = {}): ServerPlu
       const previous = parseSettings(context.previous?.settings.extensions?.podman).profile;
       if (context.caller.kind !== "agent" && selected && !isDeepStrictEqual(selected, previous)) {
         const catalog = await host.request("organization.settings.get", { namespace: "podman" }, serverCaller) as { revision: number };
-        if (selected.revision !== catalog.revision || !currentConfig().containers.some(profile => profile.id === selected.id))
+        if (selected.revision !== catalog.revision || (selected.id !== "default" && !currentConfig().containers.some(profile => profile.id === selected.id)))
           throw new ApiError("CONFLICT", "Container configuration changed or was removed; select it again before creating the agent");
       }
       if (context.caller.kind !== "agent" || !["agent.create", "agent.modify"].includes(context.method)) return;
@@ -159,6 +197,9 @@ export function createPodmanPlugin(options: PodmanPluginOptions = {}): ServerPlu
       if (!isDeepStrictEqual(next.runtime, old.runtime) || !isDeepStrictEqual(next.profile, old.profile))
         throw new ApiError("FORBIDDEN", "Only clients may choose container configurations or runtime settings");
       if ((next.image ?? null) !== (old.image ?? null)) throw new ApiError("FORBIDDEN", "Only clients may change container images");
+      const inheritedConfig = configuredGrants(parent, context.agents);
+      if (!isDeepStrictEqual(next.configGrants, old.configGrants) && !isDeepStrictEqual(next.configGrants, inheritedConfig))
+        throw new ApiError("FORBIDDEN", "Agents may only inherit container configuration mounts from their parent");
       const callerGrants = parseSettings((await normalized(caller.settings, caller, true)).extensions?.podman);
       const parentGrants = parseSettings((await normalized(parent.settings, parent, true)).extensions?.podman);
       requireDelegation(next, old, callerGrants, parentGrants);
@@ -308,7 +349,10 @@ export function createPodmanPlugin(options: PodmanPluginOptions = {}): ServerPlu
     host.registerEndpoint("podman.profiles", async (input, caller) => {
       clientOnly(caller); z.object({}).strict().parse(input ?? {});
       const settings = await host.request("organization.settings.get", { namespace: "podman" }, serverCaller) as { revision: number };
-      return { revision: settings.revision, profiles: currentConfig().containers };
+      const config = currentConfig();
+      const defaultProfile = { id: "default", name: "Default", image: config.defaultImage, network: config.network,
+        containerUid: config.containerUid, containerGid: config.containerGid, env: config.env, cwd: "", ...grantDefaults(config) };
+      return { revision: settings.revision, profiles: [defaultProfile, ...config.containers] };
     });
     host.registerEndpoint("podman.choices.images", async (input, caller) => {
       clientOnly(caller); z.object({}).strict().parse(input ?? {});
