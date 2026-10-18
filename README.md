@@ -132,8 +132,11 @@ bounds records, outstanding requests, connections, and output buffering.
 
 ## TUI and image propagation
 
-The TUI discovers `capabilities.plugins.podman` and adds `containerImage`,
-`readOnlyDirs`, `readWriteDirs`, `readOnlyVolumes` and `readWriteVolumes` editor fields.
+The TUI discovers `capabilities.plugins.podman` and adds a **Container** selector
+when configurations are available, plus `readOnlyDirs`, `readWriteDirs`,
+`readOnlyVolumes` and `readWriteVolumes` editor fields. Root drafts select
+**Default**; child drafts inherit their parent's image/runtime and configured
+mounts unless another container is selected. Extra per-agent grants do not inherit.
 Volumes use the same add/edit/remove list workflow, with server-discovered choices:
 text fuzzy-filters names, ↑/↓ selects, Tab completes, Enter stages and Escape cancels.
 Destinations/descriptions are displayed, never host storage paths. Discovery failures
@@ -144,7 +147,7 @@ not JSON prompts in the UI. Completion uses the parent/server startup base, neve
 client-local paths, and requires existing directories rather than creating grants.
 The plugin also advertises these generic `directories` descriptors under
 `capabilities.settingsEditors.podman` for other clients; the TUI avoids duplicate
-fields. A blank image means inherit. Provider/model entry is manual in container mode:
+fields. There is no separate image field. Provider/model entry is manual in container mode:
 image-based catalog discovery is not implemented, and the TUI does not use the
 host's potentially different credentials/catalog. Trusted clients can still
 explicitly query the separate host discovery API. Saving an image change asks for:

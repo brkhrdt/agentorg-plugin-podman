@@ -13,25 +13,22 @@ export const containerRuntimeSchema = z.object({
   network: networkSchema, containerUid: z.number().int().min(1).max(65535), containerGid: z.number().int().min(1).max(65535),
   env: envSchema.optional(),
 }).strict();
-const grantSetSchema = z.object({
+const grantFields = {
   readOnlyDirs: z.array(z.string().min(1)).max(128).default([]), readWriteDirs: z.array(z.string().min(1)).max(128).default([]),
   readOnlyVolumes: z.array(z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.-]*$/).max(128)).max(128).default([]),
   readWriteVolumes: z.array(z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.-]*$/).max(128)).max(128).default([]),
-}).strict().refine(settings => new Set([...settings.readOnlyVolumes, ...settings.readWriteVolumes]).size === settings.readOnlyVolumes.length + settings.readWriteVolumes.length, "Duplicate or conflicting container configuration volumes");
+};
+const uniqueVolumes = (settings: ContainerGrants) => new Set([...settings.readOnlyVolumes, ...settings.readWriteVolumes]).size === settings.readOnlyVolumes.length + settings.readWriteVolumes.length;
+const grantSetSchema = z.object(grantFields).strict().refine(uniqueVolumes, "Duplicate or conflicting container configuration volumes");
+export type ContainerGrants = z.infer<z.ZodObject<typeof grantFields>>;
 export const containerSettingsSchema = z.object({
   profile: z.object({ id: z.string().min(1).max(128), name: z.string().min(1).max(128), revision: z.number().int().nonnegative() }).strict().optional(),
   /** Immutable mount set supplied by the selected/inherited container configuration. */
   configGrants: grantSetSchema.optional(),
   runtime: containerRuntimeSchema.optional(),
   image: z.string().min(1).refine(s => !s.startsWith("-") && !/\s|\0/.test(s), "Invalid image reference").nullable().optional(),
-  readOnlyDirs: z.array(z.string().min(1)).max(128).default([]),
-  readWriteDirs: z.array(z.string().min(1)).max(128).default([]),
-  readOnlyVolumes: z.array(z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.-]*$/).max(128)).max(128).default([]),
-  readWriteVolumes: z.array(z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.-]*$/).max(128)).max(128).default([]),
-}).strict().refine(settings => {
-  const names = [...settings.readOnlyVolumes, ...settings.readWriteVolumes];
-  return new Set(names).size === names.length;
-}, "Duplicate or conflicting volume grants");
+  ...grantFields,
+}).strict().refine(uniqueVolumes, "Duplicate or conflicting volume grants");
 export type ContainerSettings = z.infer<typeof containerSettingsSchema>;
 export function parseSettings(value: unknown): ContainerSettings {
   const result = containerSettingsSchema.safeParse(value ?? {});
@@ -71,23 +68,36 @@ export function hostPath(path: string, base: string): string {
 export async function normalize(value: unknown, base: string): Promise<ContainerSettings> {
   const settings = parseSettings(value);
   const canonical = async (paths: string[]) => [...new Set(await Promise.all(paths.map(p => directory(hostPath(p, base)))))].sort();
-  const readOnlyDirs = await canonical(settings.readOnlyDirs);
-  const readWriteDirs = await canonical(settings.readWriteDirs);
-  if (readOnlyDirs.some(p => readWriteDirs.includes(p))) throw new ApiError("INVALID_PARAMS", "A directory cannot be both read-only and read/write");
-  let configGrants = settings.configGrants;
-  if (configGrants) {
-    const configuredReadOnlyDirs = await canonical(configGrants.readOnlyDirs);
-    const configuredReadWriteDirs = await canonical(configGrants.readWriteDirs);
-    if (configuredReadOnlyDirs.some(p => configuredReadWriteDirs.includes(p))) throw new ApiError("INVALID_PARAMS", "A container configuration directory cannot be both read-only and read/write");
-    configGrants = { ...configGrants, readOnlyDirs: configuredReadOnlyDirs, readWriteDirs: configuredReadWriteDirs };
-  }
-  return { ...settings, readOnlyDirs, readWriteDirs, ...(configGrants && { configGrants }) };
+  const directories = async (grants: ContainerGrants) => {
+    const readOnlyDirs = await canonical(grants.readOnlyDirs);
+    const readWriteDirs = await canonical(grants.readWriteDirs);
+    if (readOnlyDirs.some(p => readWriteDirs.includes(p))) throw new ApiError("INVALID_PARAMS", "A directory cannot be both read-only and read/write");
+    return { ...grants, readOnlyDirs, readWriteDirs };
+  };
+  return { ...await directories(settings), ...(settings.configGrants && { configGrants: await directories(settings.configGrants) }) };
 }
-export function roots(settings: ContainerSettings): string[] {
+/** Configuration mounts are mandatory; extra mounts must not weaken their permissions. */
+export function withConfiguredGrants(settings: ContainerSettings, config: ContainerGrants): ContainerSettings {
+  for (const path of roots(settings)) {
+    const configuredPermission = permission(config, path);
+    if (configuredPermission > 0 && configuredPermission < permission(settings, path))
+      throw new ApiError("FORBIDDEN", `Agent mount exceeds the selected container configuration: ${path}`);
+  }
+  const merge = (readOnly: 'readOnlyDirs' | 'readOnlyVolumes', readWrite: 'readWriteDirs' | 'readWriteVolumes') => {
+    const configured = new Set([...config[readOnly], ...config[readWrite]]);
+    const list = (key: typeof readOnly | typeof readWrite) => [...new Set([
+      ...settings[key].filter(value => !configured.has(value)), ...config[key],
+    ])].sort();
+    return { [readOnly]: list(readOnly), [readWrite]: list(readWrite) };
+  };
+  // Sorting keeps persisted settings canonical and makes repeated normalization idempotent.
+  return { ...settings, configGrants: config, ...merge('readOnlyDirs', 'readWriteDirs'), ...merge('readOnlyVolumes', 'readWriteVolumes') };
+}
+export function roots(settings: ContainerGrants): string[] {
   return [...settings.readOnlyDirs, ...settings.readWriteDirs];
 }
 /** Most specific mount wins, including a read-only island inside a writable directory. */
-export function permission(settings: ContainerSettings, path: string): number {
+export function permission(settings: ContainerGrants, path: string): number {
   let length = -1, mode = 0;
   for (const [paths, access] of [[settings.readOnlyDirs, 1], [settings.readWriteDirs, 2]] as const)
     for (const root of paths) if (contains(root, path) && root.length > length) { length = root.length; mode = access; }

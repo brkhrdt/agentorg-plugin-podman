@@ -145,6 +145,61 @@ test("mixed permission islands cannot be flattened into a writable child grant",
   } finally { rpc.close(); }
 });
 
+test("configured mounts inherit through agent-created descendants without inheriting extra grants", async () => {
+  const { root, workspace, dir, mutate, client, server, runs } = await setup([], { state: { destination: '/home/agent/state' } });
+  const readonly = join(workspace, 'readonly'), outside = join(dir, 'outside');
+  const configGrants = { readOnlyDirs: [readonly], readWriteDirs: [workspace], readOnlyVolumes: ['state'], readWriteVolumes: [] };
+  const selected = await mutate('agent.modify', { agentId: root.id, settings: { extensions: { podman: {
+    image: 'test:v2', runtime: { network: 'none', containerUid: 2200, containerGid: 2201 }, configGrants,
+    readOnlyDirs: [outside], readWriteDirs: [],
+  } } } });
+  expect(selected.status).toBe('completed');
+  const caller = { kind: 'agent', id: root.id } as const;
+  const create = async (parentId: string, podman?: unknown) => client.wait(await server.organization.request('agent.create', {
+    parentId, settings: { harness: 'fixture', cwd: workspace, ...(podman !== undefined && { extensions: { podman } }) },
+  }, { kind: 'agent', id: parentId }) as Operation);
+  const childOp = await create(root.id);
+  expect(childOp.status).toBe('completed');
+  const child = childOp.result as AgentRecord;
+  expect(child.settings.extensions?.podman).toMatchObject({ configGrants, readOnlyDirs: [readonly], readWriteDirs: [workspace], readOnlyVolumes: ['state'] });
+  expect(runs().at(-1)).toContain('test:v2');
+  expect(runs().at(-1)).toContain('--userns=keep-id:uid=2200,gid=2201');
+  expect(runs().at(-1)).toContain('state:/home/agent/state:ro,nocopy');
+  expect(runs().at(-1)!.some(arg => arg.includes(`src=${outside},`))).toBe(false);
+  expect((await create(child.id)).status).toBe('completed');
+  expect((await create(root.id, { readWriteDirs: [readonly] })).error?.code).toBe('FORBIDDEN');
+  expect((await create(root.id, { configGrants: { ...configGrants, readOnlyDirs: [], readWriteDirs: [workspace, outside] } })).error?.code).toBe('FORBIDDEN');
+  const revoked = await client.wait(await server.organization.request('agent.modify', { agentId: child.id,
+    settings: { extensions: { podman: { configGrants: {}, readWriteDirs: [workspace] } } },
+  }, caller) as Operation);
+  expect(revoked.error?.code).toBe('FORBIDDEN');
+  expect((await mutate('agent.restart', { agentId: child.id })).status).toBe('completed');
+}, 15_000);
+
+test("launch revalidates inherited configuration paths even for records without a local snapshot", async () => {
+  // Simulate legacy persisted children: only their own cwd grant is stored.
+  const legacy: ServerPlugin = { apiVersion: 1, name: 'legacy-child-settings', setup(host) {
+    host.beforeSettings((settings, agent) => agent.parentId ? { ...settings, extensions: { ...settings.extensions,
+      podman: { readWriteDirs: [settings.cwd!] },
+    } } : settings);
+  } };
+  const { dir, workspace, root, create, mutate } = await setup([legacy]);
+  const outside = join(dir, 'outside');
+  expect((await mutate('agent.modify', { agentId: root.id, settings: { extensions: { podman: {
+    configGrants: { readOnlyDirs: [outside], readWriteDirs: [workspace] },
+  } } } })).status).toBe('completed');
+  const childOp = await create(root.id);
+  expect(childOp.status).toBe('completed');
+  const child = childOp.result as AgentRecord;
+  expect(child.settings.extensions?.podman).not.toHaveProperty('configGrants');
+  expect((await mutate('agent.stop', { agentId: child.id })).status).toBe('completed');
+  renameSync(outside, `${outside}-old`);
+  symlinkSync(`${outside}-old`, outside);
+  const restart = await mutate('agent.restart', { agentId: child.id });
+  expect(restart.status).toBe('failed');
+  expect(restart.error?.message).toContain('Persisted mount/cwd paths changed');
+}, 15_000);
+
 test("image scopes pin branches, respect override boundaries, or replace all overrides", async () => {
   const { root, workspace, client, create, get, runs } = await setup();
   const child = (await create(root.id, join(workspace, "child"), { readOnlyDirs: [workspace] })).result as AgentRecord;

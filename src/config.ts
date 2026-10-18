@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type { ServerSettingsDefinition } from "agent-organization/plugin";
-import { ApiError, containerSettingsSchema, envSchema, networkSchema, parseSettings } from "./policy.ts";
+import { ApiError, containerSettingsSchema, envSchema, networkSchema, parseSettings, type ContainerGrants } from "./policy.ts";
 import { profilesSchema, profileFields } from "./profiles.ts";
 import { validateVolumeDestination, volumeConfigSchema } from "./volumes.ts";
 
@@ -51,7 +51,7 @@ export function startupConfig(options: PodmanPluginOptions): PodmanConfig {
   return validateConfig({ ...builtins, ...Object.fromEntries(Object.entries(options).filter(([, value]) => value !== undefined)) });
 }
 
-export function grantDefaults(config: PodmanConfig) {
+export function grantDefaults(config: ContainerGrants): ContainerGrants {
   return { readOnlyDirs: config.readOnlyDirs, readWriteDirs: config.readWriteDirs,
     readOnlyVolumes: config.readOnlyVolumes, readWriteVolumes: config.readWriteVolumes };
 }
