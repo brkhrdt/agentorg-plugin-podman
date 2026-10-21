@@ -32,8 +32,8 @@ test.skipIf(!process.env.ORG_PODMAN_PI_IMAGE)("example Pi image: native ACP and 
     await listing.exited;
     mcp = new Client({ name: "pi-image-test", version: "1" });
     await mcp.connect(new StdioClientTransport({ command: "podman", args: ["exec", "-i", name, "/usr/local/bin/agentorg-podman-mcp"] }));
-    expect((await mcp.listTools()).tools.map(t => t.name)).toContain("child_create");
-    const called = await mcp.callTool({ name: "child_create", arguments: { settings: { harness: "pi", cwd, env: { ANTHROPIC_API_KEY: "offline-test-not-a-real-key" } }, readOnlyDirs: [cwd] } });
+    expect((await mcp.listTools()).tools.map(t => t.name)).toContain("create_subagent");
+    const called = await mcp.callTool({ name: "create_subagent", arguments: { settings: { harness: "pi", cwd, env: { ANTHROPIC_API_KEY: "offline-test-not-a-real-key" } }, readOnlyDirs: [cwd] } });
     expect(called.isError).not.toBe(true);
     const childCreation = await client.wait(JSON.parse((called.content as any)[0].text));
     expect(childCreation.status).toBe("completed");

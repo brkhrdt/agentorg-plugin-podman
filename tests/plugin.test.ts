@@ -8,6 +8,9 @@ import type { AgentRecord, Operation } from "agent-organization/types";
 import type { ServerPlugin } from "agent-organization/plugin";
 import { createPodmanPlugin, type PodmanPluginOptions } from "../src/index.ts";
 import { RpcClient } from "../src/rpc.ts";
+import { piPlugin } from "../../agentorg-plugin-pi-agent/src/index.ts";
+import { createSkillsPlugin } from "../../agentorg-plugin-skills/src/index.ts";
+import { cwdPlugin } from "../../agentorg-plugin-unique-cwd/src/index.ts";
 
 const cleanup: (() => Promise<void>)[] = [];
 afterEach(async () => { for (const fn of cleanup.splice(0)) await fn(); });
@@ -27,8 +30,9 @@ async function setup(extra: ServerPlugin[] = [], volumes: PodmanPluginOptions['v
   writeFileSync(executable, `#!/bin/sh\nexport FAKE_PODMAN_VOLUMES='${volumeFile}'\nexport FAKE_PODMAN_LOG='${log}'\nexec '${process.execPath}' '${join(import.meta.dir, "fixtures/podman.ts")}' "$@"\n`);
   chmodSync(executable, 0o700);
   const harness: ServerPlugin = { apiVersion: 1, name: "fixture", setup(host) {
-    host.registerHarness({ name: "fixture", launch: ({ agent, executionEnvironment }) => {
+    host.registerHarness({ name: "fixture", launch: ({ agent, executionEnvironment, mcpServers }) => {
       expect(executionEnvironment).toBe("container");
+      expect(mcpServers.map(spec => spec.name)).toEqual(["agentorg"]);
       return { command: "fixture", args: [], cwd: agent.settings.cwd, env: { HOST_SECRET: "never-pass", ORG_PI_CONFIG: "fixture-config" } };
     } });
   } };
@@ -82,7 +86,35 @@ test("every launch is wrapped, grants are explicit, only private session and MCP
     await expect(rpc.request("agent.get", { agentId: root.id })).rejects.toThrow("only MCP");
     await expect(rpc.request("podman.modify", {})).rejects.toThrow("only MCP");
     const tools: any = await rpc.request("mcp.list");
-    expect(tools.tools.find((t: any) => t.name === "child_create").inputSchema.properties.readOnlyDirs).toBeDefined();
+    expect(tools.tools.find((t: any) => t.name === "create_subagent").inputSchema.properties.readOnlyDirs).toBeDefined();
+  } finally { rpc.close(); }
+});
+
+test("renamed MCP tools compose podman, Pi, skills and cwd plugins", async () => {
+  const home = mkdtempSync(join(tmpdir(), "podman-skills-test-"));
+  cleanup.push(async () => { rmSync(home, { recursive: true, force: true }); });
+  const { client, runs, relay, workspace } = await setup([piPlugin, createSkillsPlugin({ home }), cwdPlugin]);
+  const rpc = new RpcClient(relay(runs()[0]!));
+  try {
+    const { tools } = await rpc.request("mcp.list") as { tools: any[] };
+    const create = tools.find(tool => tool.name === "create_subagent");
+    const modify = tools.find(tool => tool.name === "modify_subagent");
+    expect(create.inputSchema.required).toContain("cwd");
+    for (const tool of [create, modify]) {
+      expect(tool.inputSchema.properties.readOnlyDirs).toBeDefined();
+      expect(tool.inputSchema.properties.settings.properties.extensions.properties.skills).toBeDefined();
+    }
+    const created = await client.wait(toolResult(await rpc.request("mcp.call", {
+      name: "create_subagent", arguments: { cwd: "child", settings: { harness: "fixture", extensions: { skills: {} } }, readWriteDirs: ["child"] },
+    })));
+    expect(created.status, created.error?.message).toBe("completed");
+    const child = created.result as AgentRecord;
+    expect(child.settings.cwd).toBe(join(workspace, "child"));
+    const modified = await client.wait(toolResult(await rpc.request("mcp.call", {
+      name: "modify_subagent", arguments: { agentId: child.id, readOnlyDirs: ["child"], settings: { extensions: { skills: {} } } },
+    })));
+    expect(modified.status, modified.error?.message).toBe("completed");
+    expect((modified.result as AgentRecord).settings.extensions?.podman).toMatchObject({ readOnlyDirs: [join(workspace, "child")], readWriteDirs: [] });
   } finally { rpc.close(); }
 });
 
@@ -102,7 +134,7 @@ test("agent MCP delegation rejects outside directories, symlink escapes and RO e
   const rpc = new RpcClient(relay(runs().at(-1)!));
   try {
     const invoke = async (readOnlyDirs: string[], readWriteDirs: string[], cwd = workspace) => {
-      const result = await rpc.request("mcp.call", { name: "child_create", arguments: { settings: { harness: "fixture", cwd }, readOnlyDirs, readWriteDirs } });
+      const result = await rpc.request("mcp.call", { name: "create_subagent", arguments: { settings: { harness: "fixture", cwd }, readOnlyDirs, readWriteDirs } });
       const value = toolResult(result);
       return (result as any).isError ? value : await client.wait(value);
     };
@@ -111,9 +143,9 @@ test("agent MCP delegation rejects outside directories, symlink escapes and RO e
     expect((await invoke(["escape"], [], "escape")).error?.code).toBe("FORBIDDEN");
     const child = await invoke(["child"], [], "child");
     expect(child.status).toBe("completed");
-    const changed = await rpc.request("mcp.call", { name: "descendant_modify", arguments: { agentId: child.agentId, readOnlyDirs: [], readWriteDirs: ["child"] } });
+    const changed = await rpc.request("mcp.call", { name: "modify_subagent", arguments: { agentId: child.agentId, readOnlyDirs: [], readWriteDirs: ["child"] } });
     expect((await client.wait(toolResult(changed))).error?.code).toBe("FORBIDDEN");
-    const image = await rpc.request("mcp.call", { name: "descendant_modify", arguments: { agentId: child.agentId, settings: { extensions: { podman: { image: "evil:latest", readOnlyDirs: [join(workspace, "child")] } } } } });
+    const image = await rpc.request("mcp.call", { name: "modify_subagent", arguments: { agentId: child.agentId, settings: { extensions: { podman: { image: "evil:latest", readOnlyDirs: [join(workspace, "child")] } } } } });
     expect((await client.wait(toolResult(image))).error?.code).toBe("FORBIDDEN");
   } finally { rpc.close(); }
 });
@@ -124,7 +156,7 @@ test("clients can add external directories, descendants may delegate them only w
   const child = (await create(root.id, outside, { readOnlyDirs: [outside] })).result as AgentRecord;
   const rpc = new RpcClient(relay(runs().at(-1)!));
   try {
-    const result = toolResult(await rpc.request("mcp.call", { name: "child_create", arguments: { settings: { harness: "fixture", cwd: outside }, readOnlyDirs: [outside] } }));
+    const result = toolResult(await rpc.request("mcp.call", { name: "create_subagent", arguments: { settings: { harness: "fixture", cwd: outside }, readOnlyDirs: [outside] } }));
     expect((await client.wait(result)).status).toBe("completed");
   } finally { rpc.close(); }
   await mutate("agent.modify", { agentId: child.id, settings: { cwd: join(workspace, "child"), extensions: { podman: { readWriteDirs: [join(workspace, "child")], readOnlyDirs: [outside] } } } });
@@ -139,7 +171,7 @@ test("mixed permission islands cannot be flattened into a writable child grant",
   const rpc = new RpcClient(relay(runs().at(-1)!));
   try {
     for (const ro of [[], [readonly]]) {
-      const op = toolResult(await rpc.request("mcp.call", { name: "child_create", arguments: { settings: { harness: "fixture", cwd: workspace }, readWriteDirs: [workspace], readOnlyDirs: ro } }));
+      const op = toolResult(await rpc.request("mcp.call", { name: "create_subagent", arguments: { settings: { harness: "fixture", cwd: workspace }, readWriteDirs: [workspace], readOnlyDirs: ro } }));
       expect((await client.wait(op)).status).toBe(ro.length ? "completed" : "failed");
     }
   } finally { rpc.close(); }
@@ -295,23 +327,23 @@ test('volume delegation is exact, independent of directory grants, and fences an
       return result.isError ? toolResult(result) : client.wait(toolResult(result));
     };
     const base = { settings: { harness: 'fixture', cwd: workspace }, readOnlyDirs: [workspace] };
-    const ro = await call('child_create', { ...base, readOnlyVolumes: ['pi'] });
+    const ro = await call('create_subagent', { ...base, readOnlyVolumes: ['pi'] });
     expect(ro.status).toBe('completed');
-    const rw = await call('child_create', { ...base, readWriteVolumes: ['pi'] });
+    const rw = await call('create_subagent', { ...base, readWriteVolumes: ['pi'] });
     expect(rw.status).toBe('completed');
-    expect((await call('child_create', { ...base, readOnlyVolumes: ['claude'] })).error?.code).toBe('FORBIDDEN');
+    expect((await call('create_subagent', { ...base, readOnlyVolumes: ['claude'] })).error?.code).toBe('FORBIDDEN');
     const leaf = (await create(ro.agentId, workspace, { readOnlyDirs: [workspace] })).result as AgentRecord;
-    expect((await call('descendant_modify', { agentId: leaf.id, readWriteVolumes: ['pi'] })).error?.code).toBe('FORBIDDEN'); // Caller RW, direct parent only RO.
-    expect((await call('descendant_modify', { agentId: rw.agentId, readOnlyVolumes: [] })).status).toBe('completed'); // Revoke without dependent children.
-    expect((await call('descendant_modify', { agentId: ro.agentId, readWriteVolumes: ['pi'] })).status).toBe('completed');
-    expect((await call('descendant_modify', { agentId: leaf.id, readWriteVolumes: ['pi'] })).status).toBe('completed');
-    const revoke = await call('descendant_modify', { agentId: ro.agentId, readOnlyVolumes: ['pi'] });
+    expect((await call('modify_subagent', { agentId: leaf.id, readWriteVolumes: ['pi'] })).error?.code).toBe('FORBIDDEN'); // Caller RW, direct parent only RO.
+    expect((await call('modify_subagent', { agentId: rw.agentId, readOnlyVolumes: [] })).status).toBe('completed'); // Revoke without dependent children.
+    expect((await call('modify_subagent', { agentId: ro.agentId, readWriteVolumes: ['pi'] })).status).toBe('completed');
+    expect((await call('modify_subagent', { agentId: leaf.id, readWriteVolumes: ['pi'] })).status).toBe('completed');
+    const revoke = await call('modify_subagent', { agentId: ro.agentId, readOnlyVolumes: ['pi'] });
     expect(revoke.error?.message).toContain('dependent child volume');
   } finally { rpc.close(); }
   await mutate('agent.modify', { agentId: root.id, settings: { extensions: { podman: { readWriteDirs: [workspace], readOnlyVolumes: ['pi'] } } } });
   const roRpc = new RpcClient(relay(runs().at(-1)!));
   try {
-    const result = toolResult(await roRpc.request('mcp.call', { name: 'child_create', arguments: { settings: { harness: 'fixture', cwd: workspace }, readOnlyDirs: [workspace], readWriteVolumes: ['pi'] } }));
+    const result = toolResult(await roRpc.request('mcp.call', { name: 'create_subagent', arguments: { settings: { harness: 'fixture', cwd: workspace }, readOnlyDirs: [workspace], readWriteVolumes: ['pi'] } }));
     expect((await client.wait(result)).error?.code).toBe('FORBIDDEN');
   } finally { roRpc.close(); }
 }, 60_000);

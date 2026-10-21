@@ -98,7 +98,7 @@ read/write explicitly. Do not bake credentials into an image you distribute.
 
 ## Agent MCP tools and delegation
 
-`child_create` and `descendant_modify` gain top-level arrays `readOnlyDirs`,
+`create_subagent` and `modify_subagent` gain top-level arrays `readOnlyDirs`,
 `readWriteDirs`, `readOnlyVolumes` and `readWriteVolumes`. Each pair independently
 replaces that kind of grant; an omitted array is empty when its partner is supplied.
 No mounts are inferred from `cwd` or inherited from parents. Volume names use exact

@@ -51,11 +51,11 @@ test.skipIf(process.env.ORG_PODMAN_TEST !== "1")("real rootless Podman: OS-enfor
     if (creation.status !== "completed") throw new Error(JSON.stringify(creation.error));
     const root = creation.result as AgentRecord;
     const session = join(dir, "data/sessions", root.id, "1");
-    const work = await run("agent.prompt", { agentId: root.id, text: JSON.stringify({ read: { input: join(ro, "input"), hidden: join(hidden, "secret"), database: join(dir, "data/organization.sqlite"), volumeConfig: '/home/pi/.pi/config', dotfile: '/home/pi/.pi/.credentials' }, write: { volumeWrite: '/home/pi/.pi/shared', denied: join(ro, "new"), allowed: join(rw, "new"), session: join(session, "test") }, call: { name: "child_create", arguments: { settings: { harness: "fixture", cwd: ro }, readOnlyDirs: [ro], readOnlyVolumes: [volume] } } }) });
+    const work = await run("agent.prompt", { agentId: root.id, text: JSON.stringify({ read: { input: join(ro, "input"), hidden: join(hidden, "secret"), database: join(dir, "data/organization.sqlite"), volumeConfig: '/home/pi/.pi/config', dotfile: '/home/pi/.pi/.credentials' }, write: { volumeWrite: '/home/pi/.pi/shared', denied: join(ro, "new"), allowed: join(rw, "new"), session: join(session, "test") }, call: { name: "create_subagent", arguments: { settings: { harness: "fixture", cwd: ro }, readOnlyDirs: [ro], readOnlyVolumes: [volume] } } }) });
     expect(work.status).toBe("completed");
     const result = JSON.parse((work.result as { text: string }).text);
     expect(result).toMatchObject({ uid: process.getuid!(), cwd: rw, token: null, input: "read-only-input", hidden: "ENOENT", database: "ENOENT", denied: "EROFS", allowed: "ok", session: "ok", volumeConfig: 'seeded\n', volumeWrite: 'ok', dotfile: 'test-only-secret' });
-    expect(result.tools).toContain("child_create");
+    expect(result.tools).toContain("create_subagent");
     expect(await readFile(join(rw, "new"), "utf8")).toBe("container-write");
     const childCreation = await client.wait(JSON.parse(result.call.content[0].text));
     expect(childCreation.status).toBe("completed");

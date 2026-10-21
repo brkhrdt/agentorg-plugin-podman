@@ -177,10 +177,10 @@ export function createPodmanPlugin(options: PodmanPluginOptions = {}): ServerPlu
       }
     });
 
-    for (const toolName of ["child_create", "descendant_modify"]) host.transformTool(toolName, tool => {
+    for (const toolName of ["create_subagent", "modify_subagent"]) host.transformTool(toolName, tool => {
       const properties = { ...tool.inputSchema.properties };
       const settingsSchema = properties.settings as { properties?: Record<string, unknown>; required?: string[] } | undefined;
-      if (toolName === "child_create" && settingsSchema?.properties?.cwd)
+      if (toolName === "create_subagent" && settingsSchema?.properties?.cwd)
         properties.settings = { ...settingsSchema, required: [...new Set([...(settingsSchema.required ?? []), "cwd"])] };
       const strings = { type: "array", items: { type: "string", minLength: 1 }, description: "Existing mounted directories, absolute or relative to the target's direct parent cwd. Defaults to empty; no implicit cwd mount. Never escalate read-only access." };
       properties.readOnlyDirs = strings;
@@ -197,7 +197,7 @@ export function createPodmanPlugin(options: PodmanPluginOptions = {}): ServerPlu
         const settings = parsed.settings ?? {};
         const extensions = settings.extensions as Record<string, unknown> | undefined;
         if (extensions && Object.hasOwn(extensions, "podman")) throw new ApiError("INVALID_PARAMS", "Use top-level grants or settings.extensions.podman, not both");
-        const current = toolName === "descendant_modify" ? parseSettings((await api.request("agent.get", { agentId: rest.agentId }, caller) as AgentRecord).settings.extensions?.podman) : {};
+        const current = toolName === "modify_subagent" ? parseSettings((await api.request("agent.get", { agentId: rest.agentId }, caller) as AgentRecord).settings.extensions?.podman) : {};
         // Each pair replaces extra grants; normalization restores configured mounts.
         return tool.execute({ ...rest, settings: { ...settings, extensions: { ...extensions, podman: { ...current,
           ...(dirsSupplied && { readOnlyDirs: readOnlyDirs ?? [], readWriteDirs: readWriteDirs ?? [] }),
@@ -222,7 +222,7 @@ export function createPodmanPlugin(options: PodmanPluginOptions = {}): ServerPlu
       resources.set(key, { agentId: agent.id, name, relay });
       context.executionEnvironment = "container";
       context.socketPath = relay.path;
-      context.mcpServers = [{ name: "organization", command: config.mcpExecutable, args: [], env: [{ name: "ORG_SOCKET", value: relay.path }] }];
+      context.mcpServers = [{ name: "agentorg", command: config.mcpExecutable, args: [], env: [{ name: "ORG_SOCKET", value: relay.path }] }];
       // Only an agent's own session directory is mounted, never the database or siblings' sessions.
       await mkdir(join(host.dataDir, "sessions", agent.id, String(agent.sessionNumber)), { recursive: true, mode: 0o700 });
     });
