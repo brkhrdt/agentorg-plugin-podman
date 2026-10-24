@@ -268,6 +268,7 @@ export function createPodmanPlugin(options: PodmanPluginOptions = {}): ServerPlu
       if (!spec.command || spec.command.startsWith("-")) throw new Error("Invalid container harness command");
       args.push("--entrypoint", config.entrypointExecutable, image, JSON.stringify({ mounts: identities, ...(volumeMounts.length && { volumes: volumeMounts.map(v => v.identity) }), env: childEnv }), spec.command, ...spec.args);
       const wrapped: LaunchSpec = { command: podmanExecutable, args, cwd: settings.cwd, env: { ...process.env }, inheritEnv: false,
+        consumesEnv: spec.consumesEnv,
         gracefulStop: async () => { await command(["stop", "--ignore", "--time=1", resource.name]); await cleanup(context.agent.generation!); } };
       launches.set(context, { ...wrapped, args: [...wrapped.args] });
       return wrapped;

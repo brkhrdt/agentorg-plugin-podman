@@ -14,7 +14,7 @@ import { cwdPlugin } from "../../agentorg-plugin-unique-cwd/src/index.ts";
 
 const cleanup: (() => Promise<void>)[] = [];
 afterEach(async () => { for (const fn of cleanup.splice(0)) await fn(); });
-async function setup(extra: ServerPlugin[] = [], volumes: PodmanPluginOptions['volumes'] = {}) {
+async function setup(extra: ServerPlugin[] = [], volumes: PodmanPluginOptions['volumes'] = {}, consumesEnv: string[] = []) {
   const dir = mkdtempSync(join(tmpdir(), "podman-plugin-test-"));
   const workspace = join(dir, "workspace");
   mkdirSync(join(workspace, "child", "leaf"), { recursive: true });
@@ -33,7 +33,7 @@ async function setup(extra: ServerPlugin[] = [], volumes: PodmanPluginOptions['v
     host.registerHarness({ name: "fixture", launch: ({ agent, executionEnvironment, mcpServers }) => {
       expect(executionEnvironment).toBe("container");
       expect(mcpServers.map(spec => spec.name)).toEqual(["agentorg"]);
-      return { command: "fixture", args: [], cwd: agent.settings.cwd, env: { HOST_SECRET: "never-pass", ORG_PI_CONFIG: "fixture-config" } };
+      return { command: "fixture", args: [], cwd: agent.settings.cwd, env: { HOST_SECRET: "never-pass", ORG_PI_CONFIG: "fixture-config" }, ...(consumesEnv.length && { consumesEnv }) };
     } });
   } };
   const server = await OrganizationServer.start({ dataDir: join(dir, "data"), socketPath: join(dir, "data/server.sock"),
@@ -43,8 +43,9 @@ async function setup(extra: ServerPlugin[] = [], volumes: PodmanPluginOptions['v
   cleanup.push(async () => { client.close(); await server.close(); rmSync(dir, { recursive: true, force: true }); });
   const mutate = (method: string, params: unknown) => client.request<Operation>(method, params).then(op => client.wait(op));
   const create = (parentId: string | null, cwd = workspace, podman: unknown = { readWriteDirs: [workspace] }) => mutate("agent.create", { parentId, settings: { harness: "fixture", cwd, extensions: { podman } } });
-  const root = (await create(null)).result as AgentRecord;
-  expect(root).toBeDefined();
+  const rootOperation = await create(null);
+  expect(rootOperation.status, rootOperation.error?.message).toBe("completed");
+  const root = rootOperation.result as AgentRecord;
   const runs = () => readFileSync(log, "utf8").trim().split("\n").map(l => JSON.parse(l) as string[]).filter(a => a[0] === "run");
   const relay = (run: string[]) => run.find(s => s.startsWith("ORG_SOCKET="))!.slice("ORG_SOCKET=".length);
   const get = (id: string) => client.request<AgentRecord>("agent.get", { agentId: id });
@@ -88,6 +89,14 @@ test("every launch is wrapped, grants are explicit, only private session and MCP
     const tools: any = await rpc.request("mcp.list");
     expect(tools.tools.find((t: any) => t.name === "create_subagent").inputSchema.properties.readOnlyDirs).toBeDefined();
   } finally { rpc.close(); }
+});
+
+test("Podman wrapper preserves consumed launch environment declarations", async () => {
+  const verifier: ServerPlugin = { apiVersion: 1, name: "consumed-env-verifier", setup(host) {
+    host.validateLaunch(spec => { expect(spec.consumesEnv).toContain("AGENTORG_SKILL_FILES"); });
+  } };
+  const { root } = await setup([verifier], {}, ["AGENTORG_SKILL_FILES"]);
+  expect(root).toBeDefined();
 });
 
 test("renamed MCP tools compose podman, Pi, skills and cwd plugins", async () => {
