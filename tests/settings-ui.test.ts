@@ -59,7 +59,7 @@ test.skipIf(process.env.ORG_PODMAN_TUI_TEST !== "1")("real TUI creates a named c
   } finally { await ui?.close(); client?.close(); await server?.close(); rmSync(dir, { recursive: true, force: true }); }
 }, 30_000);
 
-test.skipIf(process.env.ORG_PODMAN_TUI_TEST !== '1')('four default RO/RW lists seed new configurations and new agent drafts, without changing existing agents or pins', async () => {
+test.skipIf(process.env.ORG_PODMAN_TUI_TEST !== '1')('four default RO/RW lists seed new configurations and new agent drafts, without changing existing agents or creating pin files', async () => {
   const modulePath: string = '../../agentorg_tui/tests/terminal.ts';
   const { terminalClient } = await import(modulePath) as { terminalClient(socket: string, directory: string): TerminalClient };
   const dir = mkdtempSync(join(tmpdir(), 'podman-default-grants-ui-'));
@@ -88,7 +88,6 @@ test.skipIf(process.env.ORG_PODMAN_TUI_TEST !== '1')('four default RO/RW lists s
     await visible('Read/write volumes: [1 entries'); expect((await group()).revision).toBe(0); keys('S'); await visible('Confirm server-wide'); keys('y'); await visible('Saved on server · no agents restarted');
     const defaults = { readOnlyDirs: [readonly], readWriteDirs: [workspace], readOnlyVolumes: ['pi'], readWriteVolumes: ['extra'] };
     expect((await group()).effective).toMatchObject(defaults); expect((await group()).restartRequired).toEqual([]);
-    const pins = readFileSync(join(dataDir, 'podman-volume-pins.json'), 'utf8');
     keys('\x1b[B'.repeat(12) + '\r'); await visible('No configurations. Press a to add.'); keys('a'); await visible('Container configurations: New container');
     await visible('Read-only volumes: [1 entries'); await visible('Read/write volumes: [1 entries'); await visible('Read/write directory defaults: [1 entries');
     keys('\x1b'); await visible('Container configurations · named configurations'); keys('\x1b'); await visible('Podman containers · server-wide'); keys('\x1b'); await visible('shared by all clients'); keys('\x1b'); await visible('CLIENT ONLY'); keys('\x1b'); await visible('LATEST TRACKED EVENT');
@@ -99,7 +98,7 @@ test.skipIf(process.env.ORG_PODMAN_TUI_TEST !== '1')('four default RO/RW lists s
     keys('\x1b[B'.repeat(5) + 'z\x1b[Bz\x1b[Bz\x1b[Bz'); await visible('Read/write volumes: [0 entries; edit to inspect] · reset draft'); keys('S'); await visible('Confirm server-wide'); keys('y'); await visible('Saved on server');
     expect(await client.request<any>('podman.defaults', {})).toEqual({ readOnlyDirs: [], readWriteDirs: [], readOnlyVolumes: [], readWriteVolumes: [] });
     expect(await client.request<AgentRecord>('agent.get', { agentId: root.id })).toEqual(root);
-    expect(readFileSync(join(dataDir, 'podman-volume-pins.json'), 'utf8')).toBe(pins);
+    expect(existsSync(join(dataDir, 'podman-volume-pins.json'))).toBe(false);
     expect(JSON.parse(readFileSync(volumeFile, 'utf8'))).toEqual(records); expect(existsSync(join(dir, 'config.json'))).toBe(false);
   } finally { await ui?.close(); client?.close(); await server?.close(); rmSync(dir, { recursive: true, force: true }); }
 }, 30_000);

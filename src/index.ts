@@ -62,7 +62,7 @@ export function createPodmanPlugin(options: PodmanPluginOptions = {}): ServerPlu
     const launches = new WeakMap<LaunchContext, LaunchSpec>();
     const cleanupJobs = new Map<string, Promise<void>>();
     const command = async (args: string[]) => (await exec(podmanExecutable, args, { timeout: 20_000, maxBuffer: 4 * 1024 * 1024, env: process.env })).stdout.trim();
-    const volumes = new Volumes(config.volumes, join(host.dataDir, "podman-volume-pins.json"), command);
+    const volumes = new Volumes(config.volumes, command);
     const volumeProtectedPaths = () => [...protectedPaths, config.mcpExecutable, config.entrypointExecutable];
     async function snapshot() { return (await host.request("organization.snapshot", {}, serverCaller) as { agents: AgentRecord[] }).agents; }
     function cleanup(key: string): Promise<void> {
@@ -112,7 +112,6 @@ export function createPodmanPlugin(options: PodmanPluginOptions = {}): ServerPlu
       // Recover after a host crash before core starts any agent. Never adopt orphan containers.
       const names = (await command(["ps", "--all", "--filter", `label=${label}`, "--format", "{{.Names}}"])).split("\n").filter(Boolean);
       if (names.length) await command(["rm", "--force", "--ignore", ...names]);
-      await volumes.initialize();
     });
     async function normalized(settings: Settings, agent: Readonly<AgentRecord>, launch = false): Promise<Settings> {
       const agents = await snapshot();
@@ -136,7 +135,7 @@ export function createPodmanPlugin(options: PodmanPluginOptions = {}): ServerPlu
       }
       const effective = value.configGrants ? withConfiguredGrants(value, value.configGrants) : value;
       protect(effective, protectedPaths);
-      await volumes.validate(effective, volumeProtectedPaths(), launch);
+      await volumes.validate(effective, volumeProtectedPaths());
       if (!permission(effective, cwd)) throw new ApiError("INVALID_PARAMS", "cwd must be covered by an explicit readOnlyDirs or readWriteDirs mount");
       return { ...settings, cwd, extensions: { ...settings.extensions, podman: effective } };
     }
@@ -251,7 +250,7 @@ export function createPodmanPlugin(options: PodmanPluginOptions = {}): ServerPlu
       const sessionDir = join(host.dataDir, "sessions", context.agent.id, String(context.agent.sessionNumber));
       const identities = await Promise.all([...paths, sessionDir].map(path => mountIdentity(path)));
       identities.push(await mountIdentity(resource.relay.path, true));
-      const volumeMounts = await volumes.validate(grants, [...volumeProtectedPaths(), sessionDir, resource.relay.path], true);
+      const volumeMounts = await volumes.validate(grants, [...volumeProtectedPaths(), sessionDir, resource.relay.path]);
       for (const volume of volumeMounts) args.push("--volume", volume.argument);
       for (const path of paths) args.push("--mount", bindMount(path, grants.readOnlyDirs.includes(path)));
       args.push("--mount", bindMount(sessionDir, false));
@@ -316,10 +315,8 @@ export function createPodmanPlugin(options: PodmanPluginOptions = {}): ServerPlu
         if (!Array.isArray(records)) throw new Error("Invalid image catalog");
         const choices = new Map<string, string>();
         for (const image of records) {
-          const names = Array.isArray(image.Names) ? image.Names : Array.isArray(image.RepoTags) ? image.RepoTags : [];
-          const id = image.Id ?? image.ID;
-          for (const name of names) if (typeof name === "string" && !name.includes("<none>") && !/\s|\0/.test(name)) choices.set(name, name);
-          if (!names.length && typeof id === "string" && /^(sha256:)?[a-f0-9]{64}$/i.test(id)) choices.set(id, `(untagged) · ${id.slice(0, 20)}`);
+          const names = [...(Array.isArray(image.Names) ? image.Names : []), ...(Array.isArray(image.RepoTags) ? image.RepoTags : [])];
+          for (const name of names) if (typeof name === "string" && name && !name.includes("<none>") && !/\s|\0/.test(name)) choices.set(name, name);
         }
         return { choices: [...choices].sort(([a], [b]) => a.localeCompare(b)).map(([value, label]) => ({ value, label })) };
       } catch { throw new ApiError("UNAVAILABLE", "Could not discover local Podman images"); }

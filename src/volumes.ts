@@ -1,4 +1,3 @@
-import { readFile, rename, writeFile } from "node:fs/promises";
 import { posix } from "node:path";
 import { z } from "zod";
 import { ApiError, contains, protect, roots, volumeNames, volumePermission, type ContainerSettings } from "./policy.ts";
@@ -14,8 +13,7 @@ export const volumeConfigSchema = z.record(volumeNameSchema, z.object({
 type VolumeConfig = z.output<typeof volumeConfigSchema>;
 type Mapping = VolumeConfig[string];
 export interface VolumeChoice { name: string; destination?: string; description?: string; readOnly: boolean }
-interface Identity { createdAt: string; mountpoint: string; dev: string; ino: string }
-interface Pin extends Identity { destination: string; readOnly: boolean }
+interface Identity { dev: string; ino: string }
 export interface VolumeMount { argument: string; identity: MountIdentity & { readOnly: boolean } }
 
 /** Pure destination policy, shared by startup/settings validation and runtime grants. */
@@ -25,80 +23,52 @@ export function validateVolumeDestination(path: string, protectedPaths: string[]
   protect({ readOnlyDirs: [path], readWriteDirs: [], readOnlyVolumes: [], readWriteVolumes: [] }, protectedPaths);
 }
 
-/** Discover existing plain local volumes. Trusted clients register destinations;
- * agents only delegate names and permissions. Registrations/identity pins live in
- * protected host state and survive recovery, without plugin config or restarts.
+/** Discover existing plain local volumes. Destinations and permissions from the
+ * optional operator config or trusted client registrations are policy, not identity.
+ * Client registrations live only for this process; each launch verifies current
+ * mount identity independently before handing the volume to Podman.
  */
 export class Volumes {
-  private pins: Record<string, Pin> = {};
+  private registrations = new Map<string, Mapping>();
   private queue: Promise<unknown> = Promise.resolve();
-  constructor(private config: VolumeConfig, private file: string, private command: (args: string[]) => Promise<string>) {
+  constructor(private config: VolumeConfig, private command: (args: string[]) => Promise<string>) {
     for (const entry of Object.values(config)) validateVolumeDestination(entry.destination);
   }
-  async initialize(): Promise<void> {
-    try {
-      this.pins = z.record(volumeNameSchema, z.object({ createdAt: z.string(), mountpoint: z.string(), dev: z.string(), ino: z.string(), destination: z.string(), readOnly: z.boolean() }).strict()).parse(JSON.parse(await readFile(this.file, "utf8")));
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-    }
-  }
   private mapping(name: string): Mapping | undefined {
-    if (Object.hasOwn(this.config, name)) return this.config[name];
-    if (Object.hasOwn(this.pins, name)) return { destination: this.pins[name]!.destination, readOnly: this.pins[name]!.readOnly };
+    if (Object.hasOwn(this.config, name)) return { ...this.config[name]! };
+    const registration = this.registrations.get(name);
+    return registration && { ...registration };
   }
   private async inspect(name: string): Promise<Identity> {
     if (!volumeNameSchema.safeParse(name).success) throw new ApiError("INVALID_PARAMS", "Invalid volume name");
     try {
       const records = JSON.parse(await this.command(["volume", "inspect", name]));
       const v = records[0];
-      if (records.length !== 1 || v.Name !== name || v.Driver !== "local" || Object.keys(v.Options ?? {}).length || typeof v.CreatedAt !== "string" || !v.CreatedAt || typeof v.Mountpoint !== "string") throw new Error("Unsupported volume");
+      if (records.length !== 1 || v.Name !== name || v.Driver !== "local" || Object.keys(v.Options ?? {}).length || typeof v.Mountpoint !== "string") throw new Error("Unsupported volume");
       const identity = await mountIdentity(v.Mountpoint);
-      return { createdAt: v.CreatedAt, mountpoint: v.Mountpoint, dev: identity.dev, ino: identity.ino };
+      return { dev: identity.dev, ino: identity.ino };
     } catch {
       throw new ApiError("FORBIDDEN", `Volume is missing or not a plain local volume: ${name}`);
     }
-  }
-  private async inspectPin(name: string, mapping: Mapping): Promise<Pin> {
-    return { ...await this.inspect(name), destination: mapping.destination, readOnly: mapping.readOnly };
-  }
-  private check(name: string, pin: Pin): void {
-    if (Object.hasOwn(this.pins, name) && JSON.stringify(this.pins[name]) !== JSON.stringify(pin))
-      throw new ApiError("FORBIDDEN", `Volume identity or configuration changed: ${name}; operator reset required`);
   }
   private serialized<T>(fn: () => Promise<T>): Promise<T> {
     const work = this.queue.then(fn);
     this.queue = work.catch(() => {});
     return work;
   }
-  private async save(name: string, pin: Pin): Promise<void> {
-    const pins = { ...this.pins, [name]: pin };
-    await writeFile(`${this.file}.tmp`, JSON.stringify(pins), { mode: 0o600 });
-    await rename(`${this.file}.tmp`, this.file);
-    this.pins = pins;
-  }
-  private pinned(name: string, mapping: Mapping, requirePin: boolean): Promise<Pin> {
-    return this.serialized(async () => {
-      const pin = await this.inspectPin(name, mapping);
-      this.check(name, pin);
-      if (!Object.hasOwn(this.pins, name)) {
-        if (requirePin) throw new ApiError("FORBIDDEN", `Volume has no trusted identity pin: ${name}; update settings through a client`);
-        await this.save(name, pin);
-      }
-      return pin;
-    });
-  }
   /** Caller authorization belongs to the client-only endpoint. Registration does
-   * not grant access to any agent. Once pinned, remapping requires operator reset. */
+   * not grant access to agents. Its destination and RO policy cannot be changed
+   * until this process exits; a new process may register policy afresh.
+   */
   async configure(name: string, destination: string, protectedPaths: string[]): Promise<VolumeChoice> {
     validateVolumeDestination(destination, protectedPaths);
     return this.serialized(async () => {
       const existing = this.mapping(name);
       if (existing && existing.destination !== destination)
-        throw new ApiError("FORBIDDEN", `Volume destination already configured: ${name}; operator reset required`);
+        throw new ApiError("FORBIDDEN", `Volume destination already configured: ${name}`);
       const mapping = existing ?? { destination, readOnly: false };
-      const pin = await this.inspectPin(name, mapping);
-      this.check(name, pin);
-      if (!Object.hasOwn(this.pins, name)) await this.save(name, pin);
+      await this.inspect(name);
+      if (!Object.hasOwn(this.config, name)) this.registrations.set(name, { ...mapping });
       return { name, ...mapping };
     });
   }
@@ -110,16 +80,14 @@ export class Volumes {
     for (const name of [...new Set(names.filter(n => volumeNameSchema.safeParse(n).success))].sort()) {
       const mapping = this.mapping(name);
       try {
-        if (mapping) {
-          validateVolumeDestination(mapping.destination, protectedPaths);
-          this.check(name, await this.inspectPin(name, mapping));
-        } else await this.inspect(name);
+        if (mapping) validateVolumeDestination(mapping.destination, protectedPaths);
+        await this.inspect(name);
       } catch { continue; } // Never expose host paths, contents or inspect output.
       volumes.push({ name, ...(mapping ?? { readOnly: false }) });
     }
     return { volumes };
   }
-  async validate(settings: ContainerSettings, protectedPaths: string[], requirePin: boolean): Promise<VolumeMount[]> {
+  async validate(settings: ContainerSettings, protectedPaths: string[]): Promise<VolumeMount[]> {
     const result: VolumeMount[] = [];
     const destinations: string[] = [];
     for (const name of volumeNames(settings)) {
@@ -133,9 +101,9 @@ export class Volumes {
       validateVolumeDestination(destination, protectedPaths);
       if (roots(settings).some(p => contains(p, destination) || contains(destination, p)))
         throw new ApiError("INVALID_PARAMS", `Volume destination conflicts with a directory grant: ${name}`);
-      const pin = await this.pinned(name, entry, requirePin);
+      const identity = await this.inspect(name);
       const readOnly = volumePermission(settings, name) === 1;
-      result.push({ argument: `${name}:${destination}:${readOnly ? 'ro' : 'rw'},nocopy`, identity: { path: destination, dev: pin.dev, ino: pin.ino, readOnly } });
+      result.push({ argument: `${name}:${destination}:${readOnly ? 'ro' : 'rw'},nocopy`, identity: { path: destination, dev: identity.dev, ino: identity.ino, readOnly } });
     }
     return result;
   }

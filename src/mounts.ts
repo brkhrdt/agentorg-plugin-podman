@@ -15,7 +15,7 @@ export async function mountIdentity(path: string, socket = false): Promise<Mount
   }
   const handle = await open(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
   try {
-    if (await realpath(`/proc/${process.pid}/fd/${handle.fd}`) !== path) throw new ApiError("FORBIDDEN", `Mount path changed while preparing launch: ${path}`);
+    if (await realpath(`/proc/self/fd/${handle.fd}`) !== path) throw new ApiError("FORBIDDEN", `Mount path changed while preparing launch: ${path}`);
     const stat = await handle.stat({ bigint: true });
     return { path, dev: String(stat.dev), ino: String(stat.ino) };
   } finally { await handle.close(); }

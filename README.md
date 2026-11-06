@@ -200,8 +200,9 @@ harness options are deliberately not configuration fields.
 
 Images and volumes are discovered **on the server**, never on the TUI machine.
 Volumes without a destination prompt for an absolute **container** path before
-selection. This trusted registration persists independently of the draft, but
-never grants an agent access by itself. RW choices exclude RO-only volumes.
+selection. This trusted registration is process-local and survives agent restarts,
+but may need to be repeated after a server restart; it never grants an agent access
+by itself. RW choices exclude RO-only volumes.
 **pasta**, **slirp4netns**, and **none** are the supported network modes; network
 is a bounded selector, not arbitrary text. The appropriate pasta/slirp4netns
 helper must be installed on the server. `slirp4netns` disables host loopback.
@@ -209,9 +210,13 @@ helper must be installed on the server. `slirp4netns` disables host loopback.
 Press **S** to stage the entry into its list, **S** to stage the list into the
 server draft, then **S** and confirm the server-wide save. Names, IDs, public
 values and grant syntax are validated before saving. Changed catalogs also check
-that image references exist **locally** (without pulling). This is not a mount
-test or an in-container capability probe: image/runtime/adapter compatibility
-is ultimately checked on launch.
+that image references exist **locally** (without pulling). Choices are named tags/
+references only; untagged image IDs are not selectable. The saved reference is
+passed unchanged with `--pull=never` on every launch, so the next launch after a
+tag rebuild uses that tag's current local image. Running containers remain unchanged
+until restarted. Missing images fail launch; nothing is pulled or created implicitly.
+This is not a mount test or an in-container capability probe: image/runtime/adapter
+compatibility is ultimately checked on launch.
 
 When creating or editing an agent, choose its **Container** from the existing
 configurations. **Default** is always available and uses the current server-wide
@@ -255,14 +260,15 @@ Saved lists seed **new client-created agent drafts** and **new configurations**
 save explicitly. They apply without a server restart and never rewrite existing
 agents or saved configurations. Agent/MCP-created children and raw API requests
 still supply explicit grants: these defaults never silently expand authority.
-Reset/deletion does not delete host data or registrations/pins. Explicit volume
-destination registration persists independently of the settings draft.
+Reset/deletion does not delete host data or process-local registrations. Explicit volume
+destination registration survives agent restarts in the same server process, but may
+need to be repeated after a server restart.
 
 The old `volumes` destination-policy map is retained as a deprecated public API/
 operator compatibility setting, omitted from the normal TUI form. Version-1/2
-migrations preserve it, including existing RO restrictions and pins; its entries
-are **not** silently converted into grants. Legacy policy edits still require a
-server restart and cannot remap or weaken an existing identity pin.
+migrations preserve it, including existing RO restrictions; its entries are
+**not** silently converted into grants. These settings take effect after server
+restart. Configured mappings are ordinary policy, not persisted volume identities.
 
 Requires an AgentOrg server with the public server-settings framework. Podman
 opts in under namespace **`podman`**; the TUI discovers its fields automatically.
@@ -346,12 +352,11 @@ for example `{"pi-config":{"destination":"/home/pi/.pi","readOnly":true}}`.
 It is **not** an eligibility allowlist or a grant list. Use the legacy settings
 API to remove its overrides; `{}` empties that policy, while reset restores
 operator policy defaults.
-Deleting/resetting an entry does **not** delete a host volume, revoke any agent
-grant, or erase its trusted destination/identity pin. Previously registered/pinned
-volumes keep their mappings and RO-only policy even after removal from defaults.
-Changing a pinned destination or policy fails closed after restart; deliberate
-remapping still requires the explicit operator reset described below. Use agent
-grant editors to revoke access and `podman volume rm` separately to delete data.
+Deleting/resetting an entry does **not** delete a host volume or revoke any agent
+grant. Operator mappings apply at server startup. Client registrations are held in
+memory and cannot be redirected or weakened until that process exits. A new server
+process may use changed operator settings or accept a fresh client registration.
+Use agent grant editors to revoke access and `podman volume rm` separately to delete data.
 
 ## Operator configuration
 
@@ -390,9 +395,10 @@ labels, custom plugin module or server restart is needed.** Host bind devices,
 NFS drivers and arbitrary storage plugins remain unsupported.
 
 A volume name alone does not tell the server where to mount it. The trusted client
-or TUI chooses its container destination once; that mapping is saved in protected
-server state. Agents can delegate grants but cannot discover volumes or choose or
-redirect their destinations. Optional `volumes` plugin options provide defaults
+or TUI chooses its container destination; client registrations are process-local
+and cannot be redirected during that server process. Operator mappings are ordinary
+server settings. Agents can delegate grants but cannot discover volumes or choose
+or redirect destinations. Optional `volumes` plugin options provide defaults
 and RO-only policies for operators who want them; they are not an allowlist.
 
 ```sh
@@ -427,8 +433,8 @@ image/build context or agent settings. Volume/agent directories are mode 0700;
 files are mode 0600. An internal `.agentorg-seeded` marker records initialization.
 It refuses nonempty uninitialized volumes and does nothing if already initialized,
 including older full-directory snapshots: **it never silently prunes or replaces
-existing data**. Recreate an old volume explicitly using the operator reset
-procedure below to switch to the minimal layout. Partial copies remain
+existing data**. Recreate an old volume explicitly as a trusted operator action
+to switch to the minimal layout. Partial copies remain
 uninitialized and require operator cleanup. Host changes are never synchronized
 or overwritten automatically.
 
@@ -448,8 +454,9 @@ API clients first call the client-only `podman.volume.configure` endpoint:
 {"name": "agentorg-pi-config", "destination": "/home/pi/.pi"}
 ```
 
-This inspects the existing volume and pins its identity and mapping. Repeating the
-same registration is idempotent. Then grant it via `agent.create` or `agent.modify`:
+This inspects the existing eligible volume and registers its name-to-destination
+policy in memory. Repeating the same registration is idempotent. Then grant it via
+`agent.create` or `agent.modify`:
 
 ```json
 {
@@ -491,24 +498,23 @@ or host mountpoints. Capabilities advertise discovery at
 volume fields as generic `list` editors (the TUI uses specialized pickers without
 duplicating these descriptors).
 
-On client registration (or the first grant using an operator default) the plugin
-records creation timestamp, root device/inode and
-trusted mapping/access policy in `<data-dir>/podman-volume-pins.json`. Recovery and
-every launch re-inspect through the configured Podman executable. The native
-startup gate checks volume root identity, exact mount destination and RO/RW mode
-before running any harness code. Later plugins cannot add, omit or alter mounts.
-**Rebuild images/helpers** to use volumes; old gates reject volume manifests.
+The plugin does not persist volume identity or read/write a pin file. Legacy
+`podman-volume-pins.json` files (and temporary siblings) are ignored and left
+untouched; no migration or cleanup occurs. Client registrations are process-local:
+they survive agent restart, but after a server restart a volume whose policy came
+only from a client registration must be registered again by a trusted client before
+volume-using agents can launch. Operator-configured mappings are available from
+normal server settings. A trusted client can re-register and retry after recovery.
 
-For credential rotation, stop all consumers and explicitly update the volume
-contents, or create/seed a new volume. To deliberately replace/redirect a pinned
-volume: stop the server and consumers, remove only that name's entry from the
-protected pin file, update optional operator defaults if needed, restart the server,
-register the destination again and re-save affected settings through a trusted
-client before launching them. Ordinary volume creation/registration never needs
-a restart; this reset is only for deliberately replacing or remapping a pinned
-volume. Without it, deletion/replacement/configuration changes fail closed.
-Deleting volumes is always a
-separate trusted operator action (`podman volume rm`), never an agent operation.
+Volume identity is the exact name. A same-name replacement before a new launch is
+accepted using the existing process-local destination/RO policy (or current operator
+policy in a new process). Each launch captures a fresh root device/inode manifest;
+the native startup gate verifies that identity, exact mount destination and RO/RW
+mode before running harness code. Substitution after capture is rejected. Missing
+or ineligible volumes fail; the plugin never creates them. Later plugins cannot add,
+omit or alter mounts. **Rebuild images/helpers** to use volumes; old gates reject
+volume manifests. Deleting volumes is a separate trusted operator action
+(`podman volume rm`), never an agent operation.
 
 ## Isolation and lifecycle
 
@@ -564,7 +570,7 @@ Server-settings tests cover client/agent authorization, schema/policy validation
 no probes on reads, local-image checks before changed catalog saves, named
 configuration snapshots/deletion/stale selection, live future-launch changes without agent restarts,
 shared revisions/events, persistence/reset, pending server restarts, executable
-and helper activation, and fail-closed volume pin behavior. The optional TUI test
+and helper activation, process-local volume registration loss on server restart, and same-name replacement with fresh launch verification. The optional TUI test
 runs a real socket server and terminal client against fake rootless Podman,
 exercising image/volume/network discovery, destination registration, named
 configuration editing/confirmation, new-agent selection/launch, deletion and reset.

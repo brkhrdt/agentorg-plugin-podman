@@ -1,6 +1,6 @@
 # Named Podman volumes: implementation plan
 
-This document describes adding persistent Podman named-volume grants alongside the existing host-directory grants. A Containerfile `VOLUME` declaration is not enough: it creates an anonymous volume per container, does not share one volume among agents, and the plugin launches containers with `--rm`. The plugin must explicitly attach persistent named volumes at runtime.
+This document describes persistent Podman named-volume grants alongside the existing host-directory grants. A Containerfile `VOLUME` declaration is not enough: it creates an anonymous volume per container, does not share one volume among agents, and the plugin launches containers with `--rm`. The plugin must explicitly attach persistent named volumes at runtime.
 
 ## Goals and terminology
 
@@ -20,10 +20,10 @@ Implemented contract (revised to avoid a per-volume server/plugin allowlist):
 
 1. The operator creates/initializes volumes with Podman outside agent settings, using the same rootless Podman user as the server.
 2. `podman.volumes` discovers all existing plain local volumes without driver options. No labels, custom plugin modules, per-volume plugin entries or server restarts are required. The client-only catalog includes other applications' volumes; discovery never grants access.
-3. A trusted client selects a container destination through `podman.volume.configure({name, destination})`; the TUI prompts for it on first selection. The mapping and inspected identity persist in protected server state. Destination registration is not an agent grant. Agents cannot call this endpoint, choose destinations or redirect existing mappings.
+3. A trusted client selects a container destination through `podman.volume.configure({name, destination})`; the TUI prompts for it on first selection. Client registrations are process-local; operator-configured mappings come from normal server settings. Destination registration is not an agent grant. Agents cannot call this endpoint, choose destinations or redirect existing mappings.
 4. Each granted volume is mounted at its registered destination with `ro` or `rw` access. Reject duplicate names, overlapping granted destinations, conflicting directory/volume destinations, invalid names, and protected/runtime destinations.
 
-Optional operator plugin configuration supplies destination defaults and read-only policies, but is not an eligibility allowlist. Do not infer destinations from volume names. Registration is idempotent for the same destination; deliberate replacement or remapping requires an explicit operator reset of the identity pin.
+Optional operator plugin configuration supplies destination defaults and read-only policies, but is not an eligibility allowlist. Do not infer destinations from volume names. Volume identity is its exact Podman name: replacing a volume while retaining its name is accepted on the next launch. Within one server process, a registered mapping cannot be redirected or weakened; client registrations may be lost on server restart and can be registered again by a trusted client. Existing `podman-volume-pins.json` files are unused and left untouched; no migration or cleanup occurs.
 
 ## Authorization and delegation
 
@@ -36,14 +36,14 @@ Use the same grant rules as directory delegation, independently for volumes:
 - Grant replacement/revocation must use the same checks that prevent leaving existing descendants with more volume access than their ancestor chain permits.
 - Client-side create/modify remains trusted to select any eligible volume; agent-initiated child creation/modification is subject to the delegation checks.
 
-Authorization should compare canonical volume identities, not path prefixes or substring matches. Revalidate grants at launch/recovery, including that the volume still exists, is still eligible, and still maps to the same destination and access policy.
+Authorization uses exact volume names, not path prefixes or substring matches. Revalidate grants at launch, including that the volume still exists and is eligible. The process-local mapping preserves destination and RO policy. A fresh device/inode manifest is captured for every launch and checked by the startup gate against the actual mount destination and mode; replacement after manifest capture is rejected.
 
 ## Runtime and lifecycle
 
 - Attach each configured named volume with an explicit `ro` or `rw` mode in the final `podman run` command. Keep the existing private namespaces, UID mapping, dropped capabilities, and no-new-privileges behavior.
-- Resolve and inspect volumes through the configured Podman executable. Never mount the Podman graph root directly as a directory grant. Capture enough trusted identity/configuration to detect deletion, replacement, or destination changes before launch.
+- Resolve and inspect volumes through the configured Podman executable. Never mount the Podman graph root directly as a directory grant. Missing or ineligible volumes fail; same-name replacement before a new launch is accepted with a fresh device/inode manifest. No volume is implicitly created.
 - Extend the launch validator so later plugins cannot alter, omit, or add volume mounts. Keep volume mount arguments host-owned, like the existing directory bind arguments.
-- The startup entrypoint gate currently verifies directory/socket bind identities. Define how configured named-volume mounts are verified before starting the harness; do not weaken the existing gate. The plugin can validate Podman's named-volume identity before launch and pass an expected volume/destination/mode manifest to a gate extension, or use another explicit trusted mechanism.
+- The startup entrypoint gate verifies directory/socket bind identities and the per-launch named-volume device/inode, destination and mode manifest before starting the harness. Do not weaken these checks.
 - `--rm` removes the container, not a named volume. Stopping an agent must not delete a volume. Volume deletion should be a separate trusted operator action and must not happen as part of agent stop/removal or image propagation.
 - Multiple agents using the same read/write volume see and can modify the same files concurrently. Document this prominently; use read-only access when agents only need shared configuration. Pi token refresh/config writes may require read/write access.
 
@@ -87,5 +87,5 @@ The TUI must not duplicate plugin-advertised fields: either use specialized Podm
 2. The volume is mounted at its trusted destination with the requested mode and survives container restart/removal.
 3. An agent can delegate only the same volume permissions it holds and its direct parent permits; RW can be reduced to RO, never the reverse.
 4. TUI users can discover, fuzzy-filter, arrow-select, stage, and remove volume grants without entering JSON or arbitrary host paths.
-5. Unsupported volume drivers/options, changed volume identities/configuration, invalid destinations, and unauthorized delegation fail closed. Ordinary host-created volumes require neither labels nor plugin configuration.
+5. Unsupported volume drivers/options, missing volumes, invalid destinations and unauthorized delegation fail closed. Same-name volume replacement is accepted before a subsequent launch; substitution after manifest capture fails the gate. Ordinary host-created volumes require neither labels nor plugin configuration.
 6. Pi `~/.pi` can be seeded from the host into a named volume without adding credentials to the image or build context, with explicit documentation of shared access and snapshot/rotation behavior.

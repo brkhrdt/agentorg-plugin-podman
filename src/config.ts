@@ -18,7 +18,7 @@ export const configSchema = z.object({
   readWriteDirs: containerSettingsSchema.shape.readWriteDirs,
   readOnlyVolumes: containerSettingsSchema.shape.readOnlyVolumes,
   readWriteVolumes: containerSettingsSchema.shape.readWriteVolumes,
-  /** Legacy operator destination policy, not grants. Retained for pins/backward compatibility. */
+  /** Optional operator destination/RO policy, not grants. Retained for settings compatibility. */
   volumes: volumeConfigSchema,
   /** Names only: trusted harness variables, never host environment or credentials. */
   env: envSchema,
@@ -73,9 +73,9 @@ export function podmanServerSettings(defaults: PodmanConfig): ServerSettingsDefi
       { key: "env", label: "Environment variables", editor: "list", effect: "future-launch",
         description: "Environment variable NAMES permitted from trusted harness launch specs. Values come from that harness, not the host environment; the generation token is always removed." },
       ...profileFields.filter(field => ['readOnlyDirs', 'readWriteDirs', 'readOnlyVolumes', 'readWriteVolumes'].includes(field.key)).map(field => ({ ...field,
-        description: 'Seed new client-created agent drafts and new container configurations; review before saving. Does not change existing agents/configurations or agent-created child grants. Removing defaults never deletes data or volume registrations.' })),
+        description: 'Seed new client-created agent drafts and new container configurations; review before saving. Does not change existing agents/configurations or agent-created child grants. Removing defaults never deletes volume data.' })),
       { key: "volumes", label: "Legacy volume destination policy", editor: "object-map", effect: "restart", deprecated: true,
-        description: 'Compatibility-only operator policy. Preserves existing destinations, RO restrictions and identity pins; not default grants. Use the four RO/RW lists for new defaults.' },
+        description: 'Optional operator destination and read-only defaults; not default grants. Effective on server startup. Use the four RO/RW lists for new defaults.' },
       { key: "podmanExecutable", label: "Host Podman executable", editor: "text", effect: "restart",
         description: "Trusted host executable (path or PATH command). Resolved and verified rootless at server initialization; existing containers/cleanup retain the current executable until restart." },
       { key: "mcpExecutable", label: "Container MCP executable", editor: "text", effect: "restart",

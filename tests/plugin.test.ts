@@ -291,7 +291,7 @@ const volumeConfig = {
   claude: { destination: '/home/pi/.claude', readOnly: true },
 };
 
-test('eligible volumes have safe discovery, explicit modes, private sessions and persistent identity pins', async () => {
+test('eligible volumes have safe discovery, explicit modes, private sessions and fresh replacement checks', async () => {
   const { client, server, workspace, root, mutate, create, runs, get, volumeFile, dir } = await setup([], volumeConfig);
   await expect(server.organization.request('podman.volumes', {}, { kind: 'agent', id: root.id })).rejects.toThrow('Only clients');
   expect(await client.request<any>('podman.volumes', {})).toEqual({ volumes: [
@@ -321,7 +321,9 @@ test('eligible volumes have safe discovery, explicit modes, private sessions and
   records.pi.CreatedAt = '2026-02-01T00:00:00Z';
   writeFileSync(volumeFile, JSON.stringify(records));
   const replaced = await mutate('agent.restart', { agentId: root.id });
-  expect(replaced.error?.message).toContain('identity or configuration changed');
+  expect(replaced.status).toBe('completed');
+  const replacementBootstrap = JSON.parse(runs().at(-1)![runs().at(-1)!.indexOf('--entrypoint') + 3]!);
+  expect(replacementBootstrap.volumes.find((v: any) => v.path === '/home/pi/.pi')).toMatchObject({ readOnly: false });
   delete records.pi; writeFileSync(volumeFile, JSON.stringify(records));
   expect((await mutate('agent.restart', { agentId: root.id })).error?.message).toContain('missing');
 }, 30_000);

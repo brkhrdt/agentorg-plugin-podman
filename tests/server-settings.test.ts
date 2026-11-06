@@ -16,7 +16,10 @@ async function fixture() {
   const workspace = join(dir, "workspace"); mkdirSync(workspace);
   const log = join(dir, "commands.jsonl"), alternateLog = join(dir, "alternate.jsonl");
   const volumeFile = join(dir, "volumes.json"), imageFile = join(dir, "images.json");
-  writeFileSync(imageFile, JSON.stringify({ 'test:v1': 'a'.repeat(64), 'test:v2': 'b'.repeat(64) }));
+  writeFileSync(imageFile, JSON.stringify({
+    'test:v1': 'a'.repeat(64), 'test:v2': 'b'.repeat(64), 'test:v3': 'c'.repeat(64), 'test:v4': 'd'.repeat(64),
+    'explicit:v1': 'e'.repeat(64), 'custom:v3': 'f'.repeat(64), 'operator:v3': '1'.repeat(64), 'operator:v4': '2'.repeat(64),
+  }));
   const records = Object.fromEntries(["pi", "extra"].map(name => {
     const mountpoint = join(dir, name); mkdirSync(mountpoint);
     return [name, { Name: name, Driver: "local", Options: {}, CreatedAt: "2026-01-01", Mountpoint: mountpoint }];
@@ -145,11 +148,10 @@ test("future-launch changes affect subsequent containers without restarting agen
   } finally { peer.close(); }
 }, 15_000);
 
-test('four grant defaults are durable, detached, future-draft-only, and reset without revoking grants or deleting pins', async () => {
+test('four grant defaults are durable, detached, future-draft-only, and reset without revoking grants', async () => {
   const f = await fixture(), directory = join(f.dir, 'config'); mkdirSync(directory);
   await f.client.request('podman.volume.configure', { name: 'pi', destination: '/home/pi/.pi' });
   await f.client.request('podman.volume.configure', { name: 'extra', destination: '/home/pi/extra' });
-  const pins = readFileSync(join(f.dir, 'data/podman-volume-pins.json'), 'utf8');
   const defaults = { readOnlyDirs: [directory], readWriteDirs: [f.workspace], readOnlyVolumes: ['pi'], readWriteVolumes: ['extra'] };
   const group = await f.update(defaults); expect(group.restartRequired).toEqual([]); expect(group.effective).toMatchObject(defaults);
   expect(group.fields.find(field => field.key === 'containers')!.itemDefaultsFrom).toMatchObject(Object.fromEntries(Object.keys(defaults).map(key => [key, key])));
@@ -162,7 +164,6 @@ test('four grant defaults are durable, detached, future-draft-only, and reset wi
   await f.restart(); expect(await f.client.request<any>('podman.defaults', {})).toEqual({ ...defaults, readOnlyVolumes: [] });
   await f.update({}, Object.keys(defaults));
   expect(await f.client.request<any>('podman.defaults', {})).toEqual({ readOnlyDirs: [], readWriteDirs: [], readOnlyVolumes: [], readWriteVolumes: [] });
-  expect(readFileSync(join(f.dir, 'data/podman-volume-pins.json'), 'utf8')).toBe(pins);
 }, 15_000);
 
 test("restart-only paths and volume defaults persist over module defaults and stay effective until reopening", async () => {
@@ -187,9 +188,6 @@ test("restart-only paths and volume defaults persist over module defaults and st
   expect(run).toContain("test:v2"); expect(run[run.indexOf("--entrypoint") + 1]).toBe("/opt/agentorg/gate"); expect(f.mcpCommands.at(-1)).toBe("/opt/agentorg/mcp");
   const granted = await f.mutate("agent.modify", { agentId: root.id, settings: { extensions: { podman: { readWriteDirs: [f.workspace], readOnlyVolumes: ["pi"] } } } });
   expect(granted.status).toBe("completed"); expect(f.runs(f.alternateLog).at(-1)).toContain("pi:/home/pi/.pi:ro,nocopy");
-  const pinFile = join(f.dir, "data/podman-volume-pins.json"), pin = readFileSync(pinFile, "utf8");
-  await f.update({ volumes: {} }, ["defaultImage", "podmanExecutable", "mcpExecutable", "entrypointExecutable"]);
-  expect(readFileSync(pinFile, "utf8")).toBe(pin);
   await f.restart({ defaultImage: "operator:v3" });
   const choices = (await f.client.request<any>("podman.volumes", {})).volumes;
   expect(choices.find((v: any) => v.name === "pi")).toMatchObject({ destination: "/home/pi/.pi", readOnly: true });
@@ -246,12 +244,11 @@ test("named configurations validate local images, persist, and snapshot runtime/
   await f.restart(); expect((await f.group()).values.containers).toEqual([]);
 }, 25_000);
 
-test.each([1, 2])("version-%i settings migrate additively without losing operator overrides or volume registrations", async version => {
+test.each([1, 2])("version-%i settings migrate additively without losing operator overrides", async version => {
   const f = await fixture();
   const policy = { pi: { destination: '/home/pi/.pi', readOnly: false } };
   await f.update({ network: 'none', volumes: policy });
   await f.client.request('podman.volume.configure', { name: 'pi', destination: '/home/pi/.pi' });
-  const pins = readFileSync(join(f.dir, 'data/podman-volume-pins.json'), 'utf8');
   const record = f.server.organization.store.serverSettings('podman')!;
   f.server.organization.store.saveServerSettings({ ...record, version });
   await f.restart();
@@ -259,15 +256,39 @@ test.each([1, 2])("version-%i settings migrate additively without losing operato
   expect(migrated.version).toBe(4); expect(migrated.revision).toBe(record.revision + 1);
   expect(migrated.values.network).toBe('none'); expect(migrated.values.containers).toEqual([]); expect(migrated.values.volumes).toEqual(policy);
   expect(await f.client.request<any>('podman.defaults', {})).toEqual({ readOnlyDirs: [], readWriteDirs: [], readOnlyVolumes: [], readWriteVolumes: [] });
-  expect(readFileSync(join(f.dir, 'data/podman-volume-pins.json'), 'utf8')).toBe(pins);
   expect((await f.client.request<any>('podman.volumes', {})).volumes.find((v: any) => v.name === 'pi').destination).toBe('/home/pi/.pi');
+}, 15_000);
+
+test("missing image references fail at launch without pulling or creating an image", async () => {
+  const f = await fixture();
+  const failed = await f.create(null, 'missing:v1');
+  expect(failed.status).toBe('failed');
+  expect(f.runs().at(-1)).toContain('--pull=never');
+  expect(f.runs().at(-1)).toContain('missing:v1');
+  expect(f.commands().some(args => args[0] === 'pull' || args[0] === 'image' && args[1] === 'build')).toBe(false);
+}, 15_000);
+
+test("same-tag rebuilds preserve references and launch the current local image", async () => {
+  const f = await fixture();
+  const created = await f.create(null, 'test:v1'); expect(created.status).toBe('completed');
+  const root = created.result as AgentRecord;
+  expect(f.runs().at(-1)).toContain('test:v1');
+  writeFileSync(f.imageFile, JSON.stringify({ 'test:v1': '9'.repeat(64), 'test:v2': 'b'.repeat(64) }));
+  expect((await f.mutate('agent.restart', { agentId: root.id })).status).toBe('completed');
+  expect(f.runs().at(-1)).toContain('test:v1');
+  expect(f.runs().at(-1)).not.toContain('9'.repeat(64));
+  await f.restart();
+  expect((await f.mutate('agent.restart', { agentId: root.id })).status).toBe('completed');
+  expect(f.runs().at(-1)).toContain('test:v1');
+  expect((await f.client.request<AgentRecord>('agent.get', { agentId: root.id })).settings.extensions?.podman).toMatchObject({ image: 'test:v1' });
 }, 15_000);
 
 test("option catalogs contain public local image tags and exact eligible volume/network choices", async () => {
   const f = await fixture();
   const images = await f.client.request<any>('podman.choices.images', {});
-  expect(images.choices).toEqual([{ value: 'test:v1', label: 'test:v1' }, { value: 'test:v2', label: 'test:v2' }]);
+  expect(images.choices.map((choice: any) => choice.value)).toEqual(['alias:v1', 'custom:v3', 'explicit:v1', 'operator:v3', 'operator:v4', 'test:v1', 'test:v2', 'test:v3', 'test:v4']);
   expect(JSON.stringify(images)).not.toContain('DO-NOT-EXPOSE');
+  expect(JSON.stringify(images)).not.toContain('9999999999999999');
   const defaultOptions = await f.client.request<any>('podman.choices.volumes.defaults', {});
   expect(defaultOptions.choices.find((v: any) => v.value === 'pi')).toEqual({ value: 'pi', label: 'pi → (choose container destination)', defaults: { destination: '', readOnly: false, description: '' } });
   expect(JSON.stringify(defaultOptions)).not.toContain(f.dir);
@@ -296,7 +317,7 @@ test("image-scope orchestration uses the current fallback instead of stale modul
   expect(f.runs().at(-1)).toContain("custom:v3");
 }, 15_000);
 
-test("changing pinned volume defaults never redirects existing grants or weakens their policy", async () => {
+test("operator volume policy changes only take effect in a new process; client mappings are not recovered", async () => {
   const f = await fixture();
   await f.update({ volumes: { pi: { destination: "/home/pi/.pi" } } }); await f.restart();
   const root = (await f.create()).result as AgentRecord;
@@ -304,10 +325,14 @@ test("changing pinned volume defaults never redirects existing grants or weakens
   await f.update({ volumes: { pi: { destination: "/home/pi/redirected" } } });
   expect((await f.mutate("agent.restart", { agentId: root.id })).status).toBe("completed"); // Effective policy still unchanged.
   await f.restart();
-  const refused = await f.mutate("agent.restart", { agentId: root.id });
-  expect(refused.error?.code).toBe("START_FAILED"); expect(refused.error?.message).toContain("identity or configuration changed");
-  expect((await f.client.request<any>("podman.volumes", {})).volumes.some((v: any) => v.name === "pi")).toBe(false);
+  expect((await f.mutate("agent.restart", { agentId: root.id })).status).toBe("completed");
+  expect(f.runs().at(-1)).toContain("pi:/home/pi/.pi:ro,nocopy");
+  await f.restart();
+  expect((await f.mutate("agent.restart", { agentId: root.id })).status).toBe("completed");
+  expect(f.runs().at(-1)).toContain("pi:/home/pi/redirected:ro,nocopy");
   await f.update({}, ["volumes"]); await f.restart();
+  expect((await f.mutate("agent.restart", { agentId: root.id })).error?.message).toContain("Choose a container destination");
+  await f.client.request("podman.volume.configure", { name: "pi", destination: "/home/pi/.pi" });
   expect((await f.mutate("agent.restart", { agentId: root.id })).status).toBe("completed");
   expect(f.runs().at(-1)).toContain("pi:/home/pi/.pi:ro,nocopy");
 }, 20_000);
