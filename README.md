@@ -6,7 +6,7 @@ to empty. There is no host-harness fallback if container startup fails.
 
 ## Example Pi image
 
-Requires Linux, Bun 1.4.3+, rootless Podman with `pasta` networking, and the adjacent
+Requires Linux, Node.js 22.14+, rootless Podman with `pasta` networking, and the adjacent
 `agentorg` and `agentorg-plugin-pi-agent` repositories. Set up rootless Podman's
 subuid/subgid mappings first. The server itself must run as a non-root user.
 
@@ -18,7 +18,7 @@ sh examples/pi/build.sh
 # sh examples/pi/build.sh --seed-volume agentorg-pi-config
 
 cd ../agentorg
-node start --data-dir /tmp/my-agentorg-data \
+npm start -- --data-dir /tmp/my-agentorg-data \
           --plugin ../agentorg-plugin-pi-agent/src/index.ts \
           --plugin ../agentorg-plugin-podman/src/index.ts
 ```
@@ -32,8 +32,7 @@ non-root `pi` user. It additionally installs three native binaries:
 * `agentorg-podman-exec`: the mount-identity gate that runs before the harness.
 
 Build binaries for the image's CPU architecture. The example does not bake in
-credentials. No Bun installation inside the image is necessary. Images must
-already exist locally (`--pull=never`). Other ACP harnesses can be used if their
+credentials. Images must already exist locally (`--pull=never`). Other ACP harnesses can be used if their
 command and runtime are installed in the image; the host never mounts their
 executables or source automatically.
 

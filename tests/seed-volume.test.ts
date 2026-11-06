@@ -75,8 +75,7 @@ else if(args[0]==='volume'&&args[1]==='create') writeFileSync(process.env.FAKE_S
 else if(args[0]==='volume'&&args[1]==='inspect') console.log(process.env.FAKE_DRIVER ?? 'local|0');
 else if(args[0]==='run') { const mounts=args.filter((v,i)=>args[i-1]==='--mount'); const source=mounts.find(v=>v.includes('dst=/seed,'))?.match(/src=(.*?),dst=/)?.[1]; const script=mounts.find(v=>v.includes('dst=/run/seed-pi-config.mjs,'))?.match(/src=(.*?),dst=/)?.[1]; if(!source||!script) process.exit(2); const r=spawnSync(process.execPath,[script,source,process.env.FAKE_TARGET],{stdio:'inherit'}); process.exit(r.status??1); }
 `); chmodSync(engine, 0o700);
-  const bin = join(f.dir, 'bin'); mkdirSync(bin); writeFileSync(join(bin, 'bun'), '#!/bin/sh\nexit 0\n'); chmodSync(join(bin, 'bun'), 0o700);
-  const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, PODMAN: engine, HOME: join(f.dir, 'home'), FAKE_LOG: log, FAKE_STATE: state, FAKE_TARGET: f.target };
+  const env = { ...process.env, PODMAN: engine, HOME: join(f.dir, 'home'), FAKE_LOG: log, FAKE_STATE: state, FAKE_TARGET: f.target };
   return { engine, env, state, commands: () => readFileSync(log, 'utf8').trim().split('\n').map(line => JSON.parse(line) as string[]) };
 }
 
