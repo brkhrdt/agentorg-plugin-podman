@@ -188,6 +188,7 @@ test("restart-only paths and volume defaults persist over module defaults and st
   expect(run).toContain("test:v2"); expect(run[run.indexOf("--entrypoint") + 1]).toBe("/opt/agentorg/gate"); expect(f.mcpCommands.at(-1)).toBe("/opt/agentorg/mcp");
   const granted = await f.mutate("agent.modify", { agentId: root.id, settings: { extensions: { podman: { readWriteDirs: [f.workspace], readOnlyVolumes: ["pi"] } } } });
   expect(granted.status).toBe("completed"); expect(f.runs(f.alternateLog).at(-1)).toContain("pi:/home/pi/.pi:ro,nocopy");
+  await f.update({ volumes: { pi: { destination: "/home/pi/.pi", readOnly: true } } }, ["defaultImage", "podmanExecutable", "mcpExecutable", "entrypointExecutable"]);
   await f.restart({ defaultImage: "operator:v3" });
   const choices = (await f.client.request<any>("podman.volumes", {})).volumes;
   expect(choices.find((v: any) => v.name === "pi")).toMatchObject({ destination: "/home/pi/.pi", readOnly: true });
@@ -326,7 +327,7 @@ test("operator volume policy changes only take effect in a new process; client m
   expect((await f.mutate("agent.restart", { agentId: root.id })).status).toBe("completed"); // Effective policy still unchanged.
   await f.restart();
   expect((await f.mutate("agent.restart", { agentId: root.id })).status).toBe("completed");
-  expect(f.runs().at(-1)).toContain("pi:/home/pi/.pi:ro,nocopy");
+  expect(f.runs().at(-1)).toContain("pi:/home/pi/redirected:ro,nocopy");
   await f.restart();
   expect((await f.mutate("agent.restart", { agentId: root.id })).status).toBe("completed");
   expect(f.runs().at(-1)).toContain("pi:/home/pi/redirected:ro,nocopy");
