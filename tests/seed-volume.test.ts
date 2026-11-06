@@ -119,7 +119,7 @@ test('example build seeds only when explicitly requested, creates missing volume
   writeFileSync(join(root, 'examples/seed-volume.sh'), readFileSync(join(examples, 'seed-volume.sh')));
   writeFileSync(join(root, 'examples/seed-pi-config.mjs'), readFileSync(helper));
   for (const name of ['agentorg-podman-mcp', 'agentorg-podman-exec']) writeFileSync(join(root, 'dist', name), 'binary fixture');
-  writeFileSync(join(f.dir, 'agentorg-plugin-pi-agent/dist/agentorg-pi-acp'), 'binary fixture');
+  writeFileSync(join(f.dir, 'agentorg-plugin-pi-agent/dist/pi-acp.js'), 'console.log("adapter fixture");');
   mkdirSync(tools.env.HOME, { recursive: true }); symlinkSync(f.source, join(tools.env.HOME, '.pi'));
   const bin = join(f.dir, 'bin'); mkdirSync(bin);
   const npmLog = join(f.dir, 'npm.jsonl'), npm = join(bin, 'npm');
@@ -130,7 +130,7 @@ test('example build seeds only when explicitly requested, creates missing volume
   expect(build(['--seed-volume', 'pi-config', '--build-arg', 'PI_VERSION=1.0.2']).status).toBe(0);
   expect(tools.commands().filter(args => args[0] === 'build').at(-1)).toEqual(['build', '--tag', 'local/test:v1', '--build-arg', 'PI_VERSION=1.0.2', join(root, 'examples/pi')]);
   expect(tools.commands().some(args => args[0] === 'volume' && args[1] === 'create')).toBe(true);
-  expect(readdirSync(join(root, 'examples/pi')).sort()).toEqual(['agentorg-pi-acp', 'agentorg-podman-exec', 'agentorg-podman-mcp', 'build.sh']);
+  expect(readdirSync(join(root, 'examples/pi')).sort()).toEqual(['agentorg-pi-acp', 'agentorg-pi-acp.js', 'agentorg-podman-exec', 'agentorg-podman-mcp', 'build.sh']);
   expect(readdirSync(join(f.target, 'agent')).sort()).toEqual(['auth.json', 'settings.json']);
   expect(build(['--seed-volume']).status).not.toBe(0); expect(build(['--seed-volume', '--invalid']).status).not.toBe(0);
 });

@@ -16,8 +16,9 @@ RUN ln -s /usr/bin/fdfind /usr/bin/fd
 ARG PI_VERSION=1.0.2
 RUN npm install -g --ignore-scripts @earendil-works/pi-coding-agent@${PI_VERSION}
 
-# Native binaries are built on the host for the image's architecture. No host
-# runtimes, server executable, public socket, or source repositories are mounted.
+# The bundled adapter JavaScript and launcher are copied from the host build.
+# No server executable, public socket, or source repositories are mounted.
+COPY --chmod=755 agentorg-pi-acp.js /usr/local/bin/agentorg-pi-acp.js
 COPY --chmod=755 agentorg-pi-acp /usr/local/bin/agentorg-pi-acp
 COPY --chmod=755 agentorg-podman-mcp /usr/local/bin/agentorg-podman-mcp
 COPY --chmod=755 agentorg-podman-exec /usr/local/bin/agentorg-podman-exec
