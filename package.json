@@ -7,7 +7,7 @@
   "scripts": {
     "check": "tsc --noEmit",
     "test": "vitest run",
-    "build": "esbuild src/index.ts --bundle --platform=node --format=esm --packages=external --outfile=dist/index.js && esbuild src/mcp.ts --bundle --platform=node --format=esm --banner:js=\"#!/usr/bin/env node\" --outfile=dist/agentorg-podman-mcp && esbuild src/entrypoint.ts --bundle --platform=node --format=esm --banner:js=\"#!/usr/bin/env node\" --outfile=dist/agentorg-podman-exec && cp examples/seed-volume.sh examples/seed-pi-config.mjs dist/ && chmod 755 dist/agentorg-podman-mcp dist/agentorg-podman-exec dist/seed-volume.sh",
+    "build": "esbuild src/index.ts --bundle --platform=node --format=esm --outfile=dist/index.js && esbuild src/mcp.ts --bundle --platform=node --format=esm --banner:js=\"#!/usr/bin/env node\" --outfile=dist/agentorg-podman-mcp && esbuild src/entrypoint.ts --bundle --platform=node --format=esm --banner:js=\"#!/usr/bin/env node\" --outfile=dist/agentorg-podman-exec && cp examples/seed-volume.sh examples/seed-pi-config.mjs dist/ && chmod 755 dist/agentorg-podman-mcp dist/agentorg-podman-exec dist/seed-volume.sh",
     "test:podman": "ORG_PODMAN_TEST=1 vitest run tests/podman.test.ts",
     "test:seed:podman": "ORG_PODMAN_SEED_TEST=1 vitest run tests/seed-volume.test.ts",
     "test:build:smoke": "vitest run tests/build-smoke.test.ts",
