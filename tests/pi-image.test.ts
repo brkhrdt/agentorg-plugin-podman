@@ -1,4 +1,6 @@
-import { expect, test } from "bun:test";
+import { expect, test } from "vitest";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { mkdtemp, mkdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -27,9 +29,8 @@ test.skipIf(!process.env.ORG_PODMAN_PI_IMAGE)("example Pi image: native ACP and 
     const root = creation.result as AgentRecord;
     // The stable container name is advertised only to this trusted test through
     // podman's label/name listing; no public host capability enters the container.
-    const listing = Bun.spawn(["podman", "ps", "--format", "{{.Names}}"], { stdout: "pipe" });
-    const name = (await new Response(listing.stdout).text()).split("\n").find(n => n.endsWith(root.generation!))!;
-    await listing.exited;
+    const { stdout } = await promisify(execFile)("podman", ["ps", "--format", "{{.Names}}"]);
+    const name = stdout.split("\n").find(n => n.endsWith(root.generation!))!;
     mcp = new Client({ name: "pi-image-test", version: "1" });
     await mcp.connect(new StdioClientTransport({ command: "podman", args: ["exec", "-i", name, "/usr/local/bin/agentorg-podman-mcp"] }));
     expect((await mcp.listTools()).tools.map(t => t.name)).toContain("create_subagent");

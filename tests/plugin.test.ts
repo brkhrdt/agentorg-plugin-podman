@@ -1,4 +1,6 @@
-import { afterEach, expect, test } from "bun:test";
+import { dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+import { afterEach, expect, test } from "vitest";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -27,7 +29,7 @@ async function setup(extra: ServerPlugin[] = [], volumes: PodmanPluginOptions['v
     return [name, { Name: name, Driver: 'local', Options: {}, CreatedAt: '2026-01-01T00:00:00Z', Mountpoint: mountpoint }];
   }));
   writeFileSync(volumeFile, JSON.stringify(records));
-  writeFileSync(executable, `#!/bin/sh\nexport FAKE_PODMAN_VOLUMES='${volumeFile}'\nexport FAKE_PODMAN_LOG='${log}'\nexec '${process.execPath}' '${join(import.meta.dir, "fixtures/podman.ts")}' "$@"\n`);
+  writeFileSync(executable, `#!/bin/sh\nexport FAKE_PODMAN_VOLUMES='${volumeFile}'\nexport FAKE_PODMAN_LOG='${log}'\nexec '${process.execPath}' '${join(dirname(fileURLToPath(import.meta.url)), "fixtures/podman.ts")}' "$@"\n`);
   chmodSync(executable, 0o700);
   const harness: ServerPlugin = { apiVersion: 1, name: "fixture", setup(host) {
     host.registerHarness({ name: "fixture", launch: ({ agent, executionEnvironment, mcpServers }) => {

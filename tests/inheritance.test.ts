@@ -1,4 +1,4 @@
-import { expect, test } from 'bun:test';
+import { expect, test } from 'vitest';
 import type { AgentRecord } from 'agent-organization/types';
 import { configuredGrants, effectiveImage, effectiveRuntime } from '../src/inheritance.ts';
 import { parseSettings, withConfiguredGrants } from '../src/policy.ts';

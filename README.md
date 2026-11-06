@@ -18,7 +18,7 @@ sh examples/pi/build.sh
 # sh examples/pi/build.sh --seed-volume agentorg-pi-config
 
 cd ../agentorg
-bun start --data-dir /tmp/my-agentorg-data \
+node start --data-dir /tmp/my-agentorg-data \
           --plugin ../agentorg-plugin-pi-agent/src/index.ts \
           --plugin ../agentorg-plugin-podman/src/index.ts
 ```
@@ -39,7 +39,7 @@ executables or source automatically.
 
 Load Podman **after other launch-transforming plugins**. The final launch
 validator rejects wrappers that bypass/alter Podman. For compiled deployments,
-`bun run build` creates `dist/index.js` and the two helper binaries; load the
+`npm run build` creates the bundled Node.js plugin and helper scripts; load the
 external `dist/index.js` and install the helpers in each image.
 
 ## Directory grants and client API
@@ -550,14 +550,14 @@ into the image or grant supported external resource directories explicitly.
 ## Tests
 
 ```sh
-bun install --frozen-lockfile
-bun run check
-bun test                    # deterministic ACP + fake Podman, no model calls
-bun run test:seed:podman     # real rootless minimal seeding; requires the local example image
-bun run test:podman          # real rootless Podman; builds a temporary fixture image
-bun run test:tui             # requires adjacent agentorg_tui + its dependencies, script and stty
+npm ci
+npm run check
+npm test                    # deterministic ACP + fake Podman, no model calls
+npm run test:seed:podman     # real rootless minimal seeding; requires the local example image
+npm run test:podman          # real rootless Podman; builds a temporary fixture image
+npm run test:tui             # requires adjacent agentorg_tui + its dependencies, script and stty
 # After building the example image (startup + native MCP only; no model calls):
-ORG_PODMAN_PI_IMAGE=localhost/agentorg-pi:latest bun test tests/pi-image.test.ts
+ORG_PODMAN_PI_IMAGE=localhost/agentorg-pi:latest npx vitest run tests/pi-image.test.ts
 ```
 
 Minimal-seeding tests verify the file/settings allowlists, private modes,

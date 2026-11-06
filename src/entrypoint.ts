@@ -1,4 +1,5 @@
 import { readFile, stat } from "node:fs/promises";
+import { spawn } from "node:child_process";
 import { verifyVolumeMounts } from "./volume-gate.ts";
 import { z } from "zod";
 
@@ -26,6 +27,10 @@ if (config.volumes.length) {
 // No harness or MCP code runs before all mounts have been verified. The container
 // has a private mount namespace and no CAP_SYS_ADMIN, so it cannot replace them.
 // Untrusted runtime/loader variables are applied only here, never to this gate.
-const child = Bun.spawn(argv, { env: { ...process.env, ...config.env }, stdin: "inherit", stdout: "inherit", stderr: "inherit" });
+const child = spawn(argv[0]!, argv.slice(1), { env: { ...process.env, ...config.env }, stdio: "inherit" });
 for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"] as const) process.on(signal, () => child.kill(signal));
-process.exit(await child.exited);
+const exitCode = await new Promise<number>((resolve) => {
+  child.once("error", (error) => { console.error(error); resolve(127); });
+  child.once("exit", (code, signal) => resolve(code ?? (signal ? 128 : 1)));
+});
+process.exit(exitCode);

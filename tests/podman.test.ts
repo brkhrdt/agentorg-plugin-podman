@@ -1,4 +1,6 @@
-import { expect, test } from "bun:test";
+import { dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+import { expect, test } from "vitest";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from "node:fs/promises";
@@ -21,16 +23,16 @@ test.skipIf(process.env.ORG_PODMAN_TEST !== "1")("real rootless Podman: OS-enfor
     const binary = join(dir, "container-agent");
     const mcp = join(dir, "agentorg-podman-mcp");
     const gate = join(dir, "agentorg-podman-exec");
-    await exec(process.execPath, ["build", "--compile", join(import.meta.dir, "fixtures/container-agent.ts"), "--outfile", binary]);
-    await exec(process.execPath, ["build", "--compile", join(import.meta.dir, "../src/mcp.ts"), "--outfile", mcp]);
-    await exec(process.execPath, ["build", "--compile", join(import.meta.dir, "../src/entrypoint.ts"), "--outfile", gate]);
+    await exec(process.execPath, ["build", "--compile", join(dirname(fileURLToPath(import.meta.url)), "fixtures/container-agent.ts"), "--outfile", binary]);
+    await exec(process.execPath, ["build", "--compile", join(dirname(fileURLToPath(import.meta.url)), "../src/mcp.ts"), "--outfile", mcp]);
+    await exec(process.execPath, ["build", "--compile", join(dirname(fileURLToPath(import.meta.url)), "../src/entrypoint.ts"), "--outfile", gate]);
     await writeFile(join(dir, "Containerfile"), `FROM ${process.env.ORG_PODMAN_BASE_IMAGE ?? "docker.io/library/debian:unstable"}\nCOPY --chmod=755 container-agent /usr/local/bin/container-agent\nCOPY --chmod=755 agentorg-podman-mcp /usr/local/bin/agentorg-podman-mcp\nCOPY --chmod=755 agentorg-podman-exec /usr/local/bin/agentorg-podman-exec\n`);
     await exec("podman", ["build", "--tag", image, dir], { timeout: 180_000 });
     await exec('podman', ['volume', 'create', volume]);
     const seedSource = join(dir, 'host-pi'); await mkdir(seedSource);
     await writeFile(join(seedSource, 'config'), 'seeded\n');
     await writeFile(join(seedSource, '.credentials'), 'test-only-secret');
-    const seed = () => exec('sh', [join(import.meta.dir, '../examples/seed-volume.sh'), volume, image, seedSource], { env: { ...process.env, CONTAINER_UID: String(process.getuid!()), CONTAINER_GID: String(process.getgid!()) } });
+    const seed = () => exec('sh', [join(dirname(fileURLToPath(import.meta.url)), '../examples/seed-volume.sh'), volume, image, seedSource], { env: { ...process.env, CONTAINER_UID: String(process.getuid!()), CONTAINER_GID: String(process.getgid!()) } });
     expect((await seed()).stdout).not.toContain('test-only-secret');
     await writeFile(join(seedSource, 'config'), 'changed-host-config');
     expect((await seed()).stdout).toContain('already initialized');

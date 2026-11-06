@@ -1,10 +1,12 @@
-import { afterEach, expect, test } from 'bun:test';
+import { dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+import { afterEach, expect, test } from 'vitest';
 import { spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-const examples = join(import.meta.dir, '../examples'), helper = join(examples, 'seed-pi-config.mjs');
+const examples = join(dirname(fileURLToPath(import.meta.url)), '../examples'), helper = join(examples, 'seed-pi-config.mjs');
 const cleanup: string[] = [];
 afterEach(() => { for (const dir of cleanup.splice(0)) rmSync(dir, { recursive: true, force: true }); });
 function fixture() {
