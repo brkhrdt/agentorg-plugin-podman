@@ -121,8 +121,12 @@ test('example build seeds only when explicitly requested, creates missing volume
   for (const name of ['agentorg-podman-mcp', 'agentorg-podman-exec']) writeFileSync(join(root, 'dist', name), 'binary fixture');
   writeFileSync(join(f.dir, 'agentorg-plugin-pi-agent/dist/pi-acp'), 'binary fixture');
   mkdirSync(tools.env.HOME, { recursive: true }); symlinkSync(f.source, join(tools.env.HOME, '.pi'));
-  const build = (args: string[]) => spawnSync('sh', [join(root, 'examples/pi/build.sh'), ...args], { encoding: 'utf8', env: { ...tools.env, AGENTORG_PODMAN_IMAGE: 'local/test:v1' } });
-  expect(build([]).status).toBe(0); expect(existsSync(tools.state)).toBe(false); expect(tools.commands().some(args => args[0] === 'run')).toBe(false);
+  const bin = join(f.dir, 'bin'); mkdirSync(bin);
+  const npmLog = join(f.dir, 'npm.jsonl'), npm = join(bin, 'npm');
+  writeFileSync(npm, `#!/bin/sh\nprintf '%s %s\\n' "$PWD" "$*" >> '${npmLog}'\n`); chmodSync(npm, 0o700);
+  const build = (args: string[]) => spawnSync('sh', [join(root, 'examples/pi/build.sh'), ...args], { encoding: 'utf8', env: { ...tools.env, PATH: `${bin}:${process.env.PATH}`, AGENTORG_PODMAN_IMAGE: 'local/test:v1' } });
+  const initial = build([]); expect(initial.status, initial.stderr).toBe(0); expect(existsSync(tools.state)).toBe(false); expect(tools.commands().some(args => args[0] === 'run')).toBe(false);
+  expect(readFileSync(npmLog, 'utf8').split('\n').filter(Boolean).map(line => line.split(' ').at(-1))).toEqual(['ci', 'build', 'ci', 'build']);
   expect(build(['--seed-volume', 'pi-config', '--build-arg', 'PI_VERSION=1.0.2']).status).toBe(0);
   expect(tools.commands().filter(args => args[0] === 'build').at(-1)).toEqual(['build', '--tag', 'local/test:v1', '--build-arg', 'PI_VERSION=1.0.2', join(root, 'examples/pi')]);
   expect(tools.commands().some(args => args[0] === 'volume' && args[1] === 'create')).toBe(true);
