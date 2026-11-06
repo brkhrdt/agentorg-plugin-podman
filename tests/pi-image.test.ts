@@ -20,7 +20,7 @@ test.skipIf(!process.env.ORG_PODMAN_PI_IMAGE)("example Pi image: native ACP and 
   let server: OrganizationServer | undefined, client: OrganizationClient | undefined, mcp: Client | undefined;
   try {
     server = await OrganizationServer.start({ dataDir: join(dir, "data"), socketPath: join(dir, "data/server.sock"),
-      plugins: [createPiPlugin({ bunExecutable: "/not-mounted/bun", adapterExecutable: "/not-mounted/adapter" }), createPodmanPlugin({ defaultImage: process.env.ORG_PODMAN_PI_IMAGE!, network: "none" })],
+      plugins: [createPiPlugin({ adapterExecutable: "/not-mounted/adapter" }), createPodmanPlugin({ defaultImage: process.env.ORG_PODMAN_PI_IMAGE!, network: "none" })],
       limits: { startTimeoutMs: 30_000 } });
     client = await OrganizationClient.connect(server.organization.socketPath);
     const creation = await client.wait(await client.request<Operation>("agent.create", { settings: { harness: "pi", cwd, env: { ANTHROPIC_API_KEY: "offline-test-not-a-real-key" }, extensions: { podman: { readOnlyDirs: [cwd] } } } }));
