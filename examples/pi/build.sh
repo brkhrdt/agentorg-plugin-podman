@@ -20,7 +20,7 @@ root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 (cd "$root/../agentorg-plugin-pi-agent" && npm ci && npm run build)
 cp "$root/dist/agentorg-podman-mcp" "$root/examples/pi/agentorg-podman-mcp"
 cp "$root/dist/agentorg-podman-exec" "$root/examples/pi/agentorg-podman-exec"
-cp "$root/../agentorg-plugin-pi-agent/dist/pi-acp" "$root/examples/pi/agentorg-pi-acp"
+cp "$root/../agentorg-plugin-pi-agent/dist/agentorg-pi-acp" "$root/examples/pi/agentorg-pi-acp"
 "$podman" build --tag "$image" "$@" "$root/examples/pi"
 if [ -n "$volume" ]; then
   if ! "$podman" volume exists "$volume"; then "$podman" volume create "$volume"; fi

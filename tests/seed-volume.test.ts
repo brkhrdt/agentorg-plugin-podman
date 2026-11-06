@@ -119,7 +119,7 @@ test('example build seeds only when explicitly requested, creates missing volume
   writeFileSync(join(root, 'examples/seed-volume.sh'), readFileSync(join(examples, 'seed-volume.sh')));
   writeFileSync(join(root, 'examples/seed-pi-config.mjs'), readFileSync(helper));
   for (const name of ['agentorg-podman-mcp', 'agentorg-podman-exec']) writeFileSync(join(root, 'dist', name), 'binary fixture');
-  writeFileSync(join(f.dir, 'agentorg-plugin-pi-agent/dist/pi-acp'), 'binary fixture');
+  writeFileSync(join(f.dir, 'agentorg-plugin-pi-agent/dist/agentorg-pi-acp'), 'binary fixture');
   mkdirSync(tools.env.HOME, { recursive: true }); symlinkSync(f.source, join(tools.env.HOME, '.pi'));
   const bin = join(f.dir, 'bin'); mkdirSync(bin);
   const npmLog = join(f.dir, 'npm.jsonl'), npm = join(bin, 'npm');
