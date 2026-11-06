@@ -32,7 +32,7 @@ test.skipIf(process.env.ORG_PODMAN_TUI_TEST !== "1")("real TUI creates a named c
   const volumeFile = join(dir, 'volumes.json'), imageFile = join(dir, 'images.json'), log = join(dir, 'commands.jsonl'), executable = join(dir, 'podman');
   writeFileSync(volumeFile, JSON.stringify({ pi: { Name: 'pi', Driver: 'local', Options: {}, CreatedAt: '2026-01-01', Mountpoint: volume } }));
   writeFileSync(imageFile, JSON.stringify({ 'test:v1': 'a'.repeat(64) }));
-  writeFileSync(executable, `#!/bin/sh\nexport FAKE_PODMAN_LOG='${log}'\nexport FAKE_PODMAN_IMAGES='${imageFile}'\nexport FAKE_PODMAN_VOLUMES='${volumeFile}'\nexec '${process.execPath}' '${join(dirname(fileURLToPath(import.meta.url)), 'fixtures/podman.ts')}' "$@"\n`); chmodSync(executable, 0o700);
+  writeFileSync(executable, `#!/bin/sh\nexport FAKE_PODMAN_LOG='${log}'\nexport FAKE_PODMAN_IMAGES='${imageFile}'\nexport FAKE_PODMAN_VOLUMES='${volumeFile}'\nexec '${process.execPath}' '${join(dirname(fileURLToPath(import.meta.url)), 'fixtures/podman.mjs')}' "$@"\n`); chmodSync(executable, 0o700);
   const harness: ServerPlugin = { apiVersion: 1, name: 'fixture', setup(host) {
     host.registerHarness({ name: 'fixture', launch: ({ agent }) => ({ command: 'fixture', args: [], cwd: agent.settings.cwd }) });
   } };
@@ -78,7 +78,7 @@ test.skipIf(process.env.ORG_PODMAN_TUI_TEST !== '1')('four default RO/RW lists s
   const records = Object.fromEntries(['extra', 'pi'].map(name => { const mountpoint = join(dir, name); mkdirSync(mountpoint);
     return [name, { Name: name, Driver: 'local', Options: {}, CreatedAt: '2026-01-01', Mountpoint: mountpoint }]; }));
   writeFileSync(volumeFile, JSON.stringify(records));
-  writeFileSync(executable, `#!/bin/sh\nexport FAKE_PODMAN_LOG='${log}'\nexport FAKE_PODMAN_VOLUMES='${volumeFile}'\nexec '${process.execPath}' '${join(dirname(fileURLToPath(import.meta.url)), 'fixtures/podman.ts')}' "$@"\n`); chmodSync(executable, 0o700);
+  writeFileSync(executable, `#!/bin/sh\nexport FAKE_PODMAN_LOG='${log}'\nexport FAKE_PODMAN_VOLUMES='${volumeFile}'\nexec '${process.execPath}' '${join(dirname(fileURLToPath(import.meta.url)), 'fixtures/podman.mjs')}' "$@"\n`); chmodSync(executable, 0o700);
   const harness: ServerPlugin = { apiVersion: 1, name: 'fixture', setup(host) {
     host.registerHarness({ name: 'fixture', launch: ({ agent }) => ({ command: 'fixture', args: [], cwd: agent.settings.cwd }) });
   } };

@@ -29,7 +29,7 @@ async function fixture() {
   writeFileSync(volumeFile, JSON.stringify(records));
   function executable(name: string, log: string) {
     const path = join(dir, name);
-    writeFileSync(path, `#!/bin/sh\nexport FAKE_PODMAN_VOLUMES='${volumeFile}'\nexport FAKE_PODMAN_IMAGES='${imageFile}'\nexport FAKE_PODMAN_LOG='${log}'\nexec '${process.execPath}' '${join(dirname(fileURLToPath(import.meta.url)), "fixtures/podman.ts")}' "$@"\n`);
+    writeFileSync(path, `#!/bin/sh\nexport FAKE_PODMAN_VOLUMES='${volumeFile}'\nexport FAKE_PODMAN_IMAGES='${imageFile}'\nexport FAKE_PODMAN_LOG='${log}'\nexec '${process.execPath}' '${join(dirname(fileURLToPath(import.meta.url)), "fixtures/podman.mjs")}' "$@"\n`);
     chmodSync(path, 0o700); return path;
   }
   const podman = executable("podman", log), alternate = executable("alternate-podman", alternateLog);
