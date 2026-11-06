@@ -25,11 +25,11 @@ npm start -- --data-dir /tmp/my-agentorg-data \
 
 The example [Containerfile](examples/pi/Containerfile) is based on your
 `debian:unstable` image: Node/npm, Pi, bash, build tools, ripgrep and fd, with a
-non-root `pi` user. It additionally installs three native binaries:
+non-root `pi` user. It additionally installs a launcher for the bundled Pi ACP adapter, a stdio MCP client for the private relay, and the mount-identity gate that runs before the harness:
 
-* `agentorg-pi-acp`: the Pi harness plugin's adapter;
-* `agentorg-podman-mcp`: a stdio MCP client for the private relay;
-* `agentorg-podman-exec`: the mount-identity gate that runs before the harness.
+* `agentorg-pi-acp` plus adjacent `agentorg-pi-acp.js`: launches the bundled Pi adapter with the image's Node.js;
+* `agentorg-podman-mcp`: a bundled stdio MCP client for the private relay;
+* `agentorg-podman-exec`: the bundled mount-identity gate.
 
 Build binaries for the image's CPU architecture. The example does not bake in
 credentials. Images must already exist locally (`--pull=never`). Other ACP harnesses can be used if their
@@ -37,9 +37,11 @@ command and runtime are installed in the image; the host never mounts their
 executables or source automatically.
 
 Load Podman **after other launch-transforming plugins**. The final launch
-validator rejects wrappers that bypass/alter Podman. For compiled deployments,
-`npm run build` creates the bundled Node.js plugin and helper scripts; load the
-external `dist/index.js` and install the helpers in each image.
+validator rejects wrappers that bypass/alter Podman. For bundled deployments,
+`npm run build` creates the Node.js plugin bundle and executable helper scripts;
+load the external `dist/index.js` and install the helpers in each image. The
+helper scripts are esbuild bundles with a Node shebang, not standalone binaries;
+the image must provide a compatible Node.js runtime.
 
 ## Directory grants and client API
 

@@ -3,7 +3,7 @@ import { fileURLToPath } from "node:url";
 import { expect, test } from "vitest";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, copyFile, mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { OrganizationServer } from "../../agentorg/src/server.ts";
@@ -16,6 +16,7 @@ import { bindMount } from "../src/policy.ts";
 const exec = promisify(execFile);
 test.skipIf(process.env.ORG_PODMAN_TEST !== "1")("real rootless Podman: OS-enforced grants, private sessions, native MCP and independent containers", async () => {
   const dir = await mkdtemp(join(tmpdir(), "real-aop-test-"));
+  const packageRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
   const image = `localhost/aop-test:${crypto.randomUUID()}`;
   const volume = `aop-test-${crypto.randomUUID()}`;
   let server: OrganizationServer | undefined, client: OrganizationClient | undefined;
@@ -23,10 +24,16 @@ test.skipIf(process.env.ORG_PODMAN_TEST !== "1")("real rootless Podman: OS-enfor
     const binary = join(dir, "container-agent");
     const mcp = join(dir, "agentorg-podman-mcp");
     const gate = join(dir, "agentorg-podman-exec");
-    await exec(process.execPath, ["build", "--compile", join(dirname(fileURLToPath(import.meta.url)), "fixtures/container-agent.ts"), "--outfile", binary]);
-    await exec(process.execPath, ["build", "--compile", join(dirname(fileURLToPath(import.meta.url)), "../src/mcp.ts"), "--outfile", mcp]);
-    await exec(process.execPath, ["build", "--compile", join(dirname(fileURLToPath(import.meta.url)), "../src/entrypoint.ts"), "--outfile", gate]);
-    await writeFile(join(dir, "Containerfile"), `FROM ${process.env.ORG_PODMAN_BASE_IMAGE ?? "docker.io/library/debian:unstable"}\nCOPY --chmod=755 container-agent /usr/local/bin/container-agent\nCOPY --chmod=755 agentorg-podman-mcp /usr/local/bin/agentorg-podman-mcp\nCOPY --chmod=755 agentorg-podman-exec /usr/local/bin/agentorg-podman-exec\n`);
+    const esbuild = join(packageRoot, "node_modules/.bin/esbuild");
+    const bundle = async (source: string, output: string) => {
+      await exec(esbuild, [join(packageRoot, source), "--bundle", "--platform=node", "--format=esm", "--banner:js=#!/usr/local/bin/node", `--outfile=${output}`]);
+      await chmod(output, 0o755);
+    };
+    await bundle("tests/fixtures/container-agent.ts", binary);
+    await bundle("src/mcp.ts", mcp);
+    await bundle("src/entrypoint.ts", gate);
+    await copyFile(process.execPath, join(dir, "node"));
+    await writeFile(join(dir, "Containerfile"), `FROM ${process.env.ORG_PODMAN_BASE_IMAGE ?? "docker.io/library/debian:unstable"}\nCOPY --chmod=755 node /usr/local/bin/node\nCOPY --chmod=755 container-agent /usr/local/bin/container-agent\nCOPY --chmod=755 agentorg-podman-mcp /usr/local/bin/agentorg-podman-mcp\nCOPY --chmod=755 agentorg-podman-exec /usr/local/bin/agentorg-podman-exec\n`);
     await exec("podman", ["build", "--tag", image, dir], { timeout: 180_000 });
     await exec('podman', ['volume', 'create', volume]);
     const seedSource = join(dir, 'host-pi'); await mkdir(seedSource);
