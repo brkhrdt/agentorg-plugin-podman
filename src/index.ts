@@ -61,7 +61,14 @@ export function createPodmanPlugin(options: PodmanPluginOptions = {}): ServerPlu
     const resources = new Map<string, { agentId: string; name: string; relay: Awaited<ReturnType<typeof createRelay>> }>();
     const launches = new WeakMap<LaunchContext, LaunchSpec>();
     const cleanupJobs = new Map<string, Promise<void>>();
-    const command = async (args: string[]) => (await exec(podmanExecutable, args, { timeout: 20_000, maxBuffer: 4 * 1024 * 1024, env: process.env })).stdout.trim();
+    const command = async (args: string[]) => {
+      try { return (await exec(podmanExecutable, args, { timeout: 20_000, maxBuffer: 4 * 1024 * 1024, env: process.env })).stdout.trim(); }
+      catch (error) {
+        const failure = error as Error & { stderr?: string; code?: string | number };
+        const stderr = failure.stderr?.trim();
+        throw new Error(`Podman ${args[0]} failed${failure.code ? ` (${failure.code})` : ""}: ${stderr || failure.message}`, { cause: error });
+      }
+    };
     const volumes = new Volumes(config.volumes, command);
     const volumeProtectedPaths = () => [...protectedPaths, config.mcpExecutable, config.entrypointExecutable];
     async function snapshot() { return (await host.request("organization.snapshot", {}, serverCaller) as { agents: AgentRecord[] }).agents; }
