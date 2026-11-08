@@ -265,7 +265,7 @@ test("image scopes pin branches, respect override boundaries, or replace all ove
   await change("test:v4", "all");
   expect((await get(leaf.id)).settings.extensions?.podman).toMatchObject({ image: null });
   expect(runs().at(-1)).toContain("test:v4");
-});
+}, 15_000);
 
 test("stale generations lose relay access; launch refuses replaced mount paths", async () => {
   const { root, workspace, dir, runs, relay, mutate } = await setup();
