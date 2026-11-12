@@ -22,11 +22,14 @@ const uniqueVolumes = (settings: ContainerGrants) => new Set([...settings.readOn
 const grantSetSchema = z.object(grantFields).strict().refine(uniqueVolumes, "Duplicate or conflicting container configuration volumes");
 export type ContainerGrants = z.infer<z.ZodObject<typeof grantFields>>;
 export const containerSettingsSchema = z.object({
+  executionEnvironment: z.enum(["host", "container"]).optional(),
   profile: z.object({ id: z.string().min(1).max(128), name: z.string().min(1).max(128), revision: z.number().int().nonnegative() }).strict().optional(),
   /** Immutable mount set supplied by the selected/inherited container configuration. */
   configGrants: grantSetSchema.optional(),
   runtime: containerRuntimeSchema.optional(),
   image: z.string().min(1).refine(s => !s.startsWith("-") && !/\s|\0/.test(s), "Invalid image reference").nullable().optional(),
+  /** Provenance of a locally frozen image snapshot; trusted-client propagation only. */
+  imageInherited: z.boolean().optional(),
   ...grantFields,
 }).strict().refine(uniqueVolumes, "Duplicate or conflicting volume grants");
 export type ContainerSettings = z.infer<typeof containerSettingsSchema>;
@@ -104,11 +107,11 @@ export function permission(settings: ContainerGrants, path: string): number {
   return mode;
 }
 /** Check all permission boundaries, not merely each requested mount's root. */
-export function requireDelegation(next: ContainerSettings, previous: ContainerSettings, caller: ContainerSettings, parent: ContainerSettings): void {
+export function requireDelegation(next: ContainerSettings, previous: ContainerSettings, caller: ContainerSettings, parent: ContainerSettings, hostCaller = false, hostParent = false): void {
   const boundaries = new Set([...roots(next), ...roots(previous), ...roots(caller), ...roots(parent)]);
   for (const path of boundaries) {
     const mode = permission(next, path);
-    if (mode > permission(previous, path) && (mode > permission(caller, path) || mode > permission(parent, path)))
+    if (mode > permission(previous, path) && ((!hostCaller && mode > permission(caller, path)) || (!hostParent && mode > permission(parent, path))))
       throw new ApiError("FORBIDDEN", `Cannot delegate ${mode === 2 ? "read/write" : "read-only"} access to ${path}; both caller and direct parent must have that access`);
   }
 }
@@ -118,10 +121,10 @@ export function volumeNames(settings: ContainerSettings): string[] {
 export function volumePermission(settings: ContainerSettings, name: string): number {
   return settings.readWriteVolumes.includes(name) ? 2 : settings.readOnlyVolumes.includes(name) ? 1 : 0;
 }
-export function requireVolumeDelegation(next: ContainerSettings, previous: ContainerSettings, caller: ContainerSettings, parent: ContainerSettings): void {
+export function requireVolumeDelegation(next: ContainerSettings, previous: ContainerSettings, caller: ContainerSettings, parent: ContainerSettings, hostCaller = false, hostParent = false): void {
   for (const name of volumeNames(next)) {
     const mode = volumePermission(next, name);
-    if (mode > volumePermission(previous, name) && (mode > volumePermission(caller, name) || mode > volumePermission(parent, name)))
+    if (mode > volumePermission(previous, name) && ((!hostCaller && mode > volumePermission(caller, name)) || (!hostParent && mode > volumePermission(parent, name))))
       throw new ApiError("FORBIDDEN", `Cannot delegate volume ${name}; both caller and direct parent must have sufficient access`);
   }
 }

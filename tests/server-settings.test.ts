@@ -117,7 +117,7 @@ test("Podman declares public server fields; validation/auth are authoritative an
   expect(f.commands()).toHaveLength(beforeSave);
 }, 15_000);
 
-test("future-launch changes affect subsequent containers without restarting agents; reset restores startup defaults", async () => {
+test("server defaults do not retarget assigned containers; reset restores startup defaults", async () => {
   const f = await fixture();
   const root = (await f.create()).result as AgentRecord;
   const peer = await OrganizationClient.connect(f.server.organization.socketPath);
@@ -132,10 +132,11 @@ test("future-launch changes affect subsequent containers without restarting agen
     expect(bootstrap(f.runs()[0]!).env).toMatchObject({ ORG_PI_CONFIG: "legacy-config" });
     const child = await f.create(root.id); expect(child.status).toBe("completed");
     const run = f.runs().at(-1)!;
-    expect(run).toContain("test:v2"); expect(run[run.indexOf("--network") + 1]).toBe("none");
-    expect(run).toContain("--userns=keep-id:uid=2000,gid=2001"); expect(run[run.indexOf("--user") + 1]).toBe("2000:2001");
-    expect(bootstrap(run).env.PUBLIC_CONFIG).toBe("new-config");
-    expect(bootstrap(run).env.ORG_PI_CONFIG).toBeUndefined(); expect(bootstrap(run).env.HOST_SECRET).toBeUndefined();
+    // Existing root assignment is frozen; server defaults affect only explicit reselection/new root assignments.
+    expect(run).toContain("test:v1"); expect(run[run.indexOf("--network") + 1]).toBe("pasta");
+    expect(run).toContain("--userns=keep-id:uid=1000,gid=1000"); expect(run[run.indexOf("--user") + 1]).toBe("1000:1000");
+    expect(bootstrap(run).env.PUBLIC_CONFIG).toBeUndefined();
+    expect(bootstrap(run).env.ORG_PI_CONFIG).toBe("legacy-config"); expect(bootstrap(run).env.HOST_SECRET).toBeUndefined();
     expect((await f.create(root.id, "explicit:v1")).status).toBe("completed"); expect(f.runs().at(-1)).toContain("explicit:v1");
     const revision = saved.revision;
     await expect(peer.request("organization.settings.update", { namespace: "podman", expectedRevision: 0, patch: { network: "pasta" } })).rejects.toMatchObject({ code: "CONFLICT" });
@@ -178,7 +179,7 @@ test("restart-only paths and volume defaults persist over module defaults and st
   expect(pending.effective.volumes).toEqual({}); expect(pending.effective.podmanExecutable).toBe(f.podman);
   expect((await f.client.request<any>("podman.volumes", {})).volumes.find((v: any) => v.name === "pi").destination).toBeUndefined();
   expect((await f.mutate("agent.restart", { agentId: root.id })).status).toBe("completed");
-  expect(f.runs().at(-1)).toContain("test:v2"); expect(f.runs().at(-1)![f.runs().at(-1)!.indexOf("--entrypoint") + 1]).toBe("/usr/local/bin/agentorg-podman-exec");
+  expect(f.runs().at(-1)).toContain("test:v1"); expect(f.runs().at(-1)![f.runs().at(-1)!.indexOf("--entrypoint") + 1]).toBe("/usr/local/bin/agentorg-podman-exec");
   expect(f.mcpCommands.at(-1)).toBe("/usr/local/bin/agentorg-podman-mcp"); expect(f.commands(f.alternateLog)).toEqual([]);
   await f.restart({ defaultImage: "operator:v3" });
   const reopened = await f.group();
@@ -187,7 +188,7 @@ test("restart-only paths and volume defaults persist over module defaults and st
   expect(f.commands(f.alternateLog)[0]![0]).toBe("info");
   expect((await f.mutate("agent.restart", { agentId: root.id })).status).toBe("completed");
   const run = f.runs(f.alternateLog).at(-1)!;
-  expect(run).toContain("test:v2"); expect(run[run.indexOf("--entrypoint") + 1]).toBe("/opt/agentorg/gate"); expect(f.mcpCommands.at(-1)).toBe("/opt/agentorg/mcp");
+  expect(run).toContain("test:v1"); expect(run[run.indexOf("--entrypoint") + 1]).toBe("/opt/agentorg/gate"); expect(f.mcpCommands.at(-1)).toBe("/opt/agentorg/mcp");
   const granted = await f.mutate("agent.modify", { agentId: root.id, settings: { extensions: { podman: { readWriteDirs: [f.workspace], readOnlyVolumes: ["pi"] } } } });
   expect(granted.status).toBe("completed"); expect(f.runs(f.alternateLog).at(-1)).toContain("pi:/home/pi/.pi:ro,nocopy");
   await f.update({ volumes: { pi: { destination: "/home/pi/.pi", readOnly: true } } }, ["defaultImage", "podmanExecutable", "mcpExecutable", "entrypointExecutable"]);
@@ -195,7 +196,7 @@ test("restart-only paths and volume defaults persist over module defaults and st
   const choices = (await f.client.request<any>("podman.volumes", {})).volumes;
   expect(choices.find((v: any) => v.name === "pi")).toMatchObject({ destination: "/home/pi/.pi", readOnly: true });
   expect(choices.find((v: any) => v.name === "extra").destination).toBeUndefined();
-  expect((await f.mutate("agent.restart", { agentId: root.id })).status).toBe("completed"); expect(f.runs().at(-1)).toContain("operator:v3");
+  expect((await f.mutate("agent.restart", { agentId: root.id })).status).toBe("completed"); expect(f.runs().at(-1)).toContain("test:v1");
   const escalation = await f.mutate("agent.modify", { agentId: root.id, settings: { extensions: { podman: { readWriteDirs: [f.workspace], readWriteVolumes: ["pi"] } } } });
   expect(escalation.error?.message).toContain("only read-only");
   expect([...f.commands(), ...f.commands(f.alternateLog)].some(args => args[0] === "volume" && args[1] === "rm")).toBe(false);
@@ -227,6 +228,7 @@ test("named configurations validate local images, persist, and snapshot runtime/
     } } } });
   const creation = await createFrom(null, profile, saved.revision); expect(creation.status).toBe('completed');
   const root = creation.result as AgentRecord;
+  expect(root.settings.extensions?.podman).toMatchObject({ image: 'test:v1', imageInherited: false });
   expect(f.runs()[0]).toContain('test:v1'); expect(f.runs()[0]).toContain('--userns=keep-id:uid=2200,gid=2201');
   expect(f.runs()[0]![f.runs()[0]!.indexOf('--network') + 1]).toBe('none');
   const changed = { ...profile, image: 'test:v2', network: 'pasta', containerUid: 3300, containerGid: 3301 };
@@ -305,18 +307,18 @@ test("option catalogs contain public local image tags and exact eligible volume/
   expect(network.choices).toEqual(['slirp4netns', 'pasta', 'none']);
 }, 15_000);
 
-test("image-scope orchestration uses the current fallback instead of stale module defaults", async () => {
+test("image-scope orchestration preserves frozen descendant assignments", async () => {
   const f = await fixture();
   const root = (await f.create()).result as AgentRecord;
   await f.update({ defaultImage: "test:v2" });
   const child = (await f.create(root.id)).result as AgentRecord;
-  expect(f.runs().at(-1)).toContain("test:v2");
+  expect(f.runs().at(-1)).toContain("test:v1");
   const result = await f.client.request<{ errors: unknown[] }>("podman.modify", {
     agentId: root.id, expectedRevision: root.revision, imageScope: "node",
     settings: { extensions: { podman: { ...root.settings.extensions?.podman as object, image: "custom:v3" } } },
   });
   expect(result.errors).toEqual([]);
-  expect((await f.client.request<AgentRecord>("agent.get", { agentId: child.id })).settings.extensions?.podman).toMatchObject({ image: "test:v2" });
+  expect((await f.client.request<AgentRecord>("agent.get", { agentId: child.id })).settings.extensions?.podman).toMatchObject({ image: "test:v1", imageInherited: false });
   expect(f.runs().at(-1)).toContain("custom:v3");
 }, 15_000);
 

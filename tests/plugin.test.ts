@@ -9,6 +9,7 @@ import { OrganizationClient } from "agent-organization/client";
 import type { AgentRecord, Operation } from "agent-organization/types";
 import type { ServerPlugin } from "agent-organization/plugin";
 import { createPodmanPlugin, type PodmanPluginOptions } from "../src/index.ts";
+import { tsxImport } from "../../agentorg/tests/runtime.ts";
 import { RpcClient } from "../src/rpc.ts";
 import { piPlugin } from "../../agentorg-plugin-pi-agent/src/index.ts";
 import { createSkillsPlugin } from "../../agentorg-plugin-skills/src/index.ts";
@@ -33,8 +34,9 @@ async function setup(extra: ServerPlugin[] = [], volumes: PodmanPluginOptions['v
   chmodSync(executable, 0o700);
   const harness: ServerPlugin = { apiVersion: 1, name: "fixture", setup(host) {
     host.registerHarness({ name: "fixture", launch: ({ agent, executionEnvironment, mcpServers }) => {
-      expect(executionEnvironment).toBe("container");
+      expect(executionEnvironment).toBe((agent.settings.extensions?.podman as { executionEnvironment?: string } | undefined)?.executionEnvironment === "host" ? undefined : "container");
       expect(mcpServers.map(spec => spec.name)).toEqual(["agentorg"]);
+      if (executionEnvironment === undefined) return { command: process.execPath, args: ["--import", tsxImport, join(import.meta.dirname, "fixtures/agent.ts")], cwd: agent.settings.cwd };
       return { command: "fixture", args: [], cwd: agent.settings.cwd, env: { HOST_SECRET: "never-pass", ORG_PI_CONFIG: "fixture-config" }, ...(consumesEnv.length && { consumesEnv }) };
     } });
   } };
@@ -92,6 +94,26 @@ test("every launch is wrapped, grants are explicit, only private session and MCP
     expect(tools.tools.find((t: any) => t.name === "create_subagent").inputSchema.properties.readOnlyDirs).toBeDefined();
   } finally { rpc.close(); }
 });
+
+test("Host roots use native launch and their agent-created children remain frozen containers", async () => {
+  const { root, workspace, mutate, client, server, runs } = await setup();
+  const before = runs().length;
+  const switched = await mutate("agent.modify", { agentId: root.id, settings: { extensions: { podman: { executionEnvironment: "host" } } } });
+  expect(switched.status).toBe("completed");
+  expect(runs()).toHaveLength(before); // No Podman relaunch for Host.
+  expect((switched.result as AgentRecord).settings.extensions?.podman).toEqual({ executionEnvironment: "host" });
+  const created = await client.wait(await server.organization.request("agent.create", {
+    parentId: root.id, settings: { harness: "fixture", cwd: workspace, extensions: { podman: { readWriteDirs: [workspace] } } },
+  }, { kind: "agent", id: root.id }) as Operation);
+  expect(created.status).toBe("completed");
+  const child = created.result as AgentRecord;
+  expect(child.settings.extensions?.podman).toMatchObject({ executionEnvironment: "container", image: "test:v1", imageInherited: true, runtime: { network: "pasta" } });
+  expect(runs().length).toBeGreaterThan(before);
+  const rejected = await server.organization.request("agent.create", {
+    parentId: root.id, settings: { harness: "fixture", cwd: workspace, extensions: { podman: { executionEnvironment: "host" } } },
+  }, { kind: "agent", id: root.id }) as Operation;
+  expect((await client.wait(rejected)).error?.code).toBe("FORBIDDEN");
+}, 15_000);
 
 test("Podman wrapper preserves consumed launch environment declarations", async () => {
   const verifier: ServerPlugin = { apiVersion: 1, name: "consumed-env-verifier", setup(host) {
@@ -204,7 +226,9 @@ test("configured mounts inherit through agent-created descendants without inheri
   const childOp = await create(root.id);
   expect(childOp.status).toBe('completed');
   const child = childOp.result as AgentRecord;
-  expect(child.settings.extensions?.podman).toMatchObject({ configGrants, readOnlyDirs: [readonly], readWriteDirs: [workspace], readOnlyVolumes: ['state'] });
+  expect(child.settings.extensions?.podman).toMatchObject({ image: 'test:v2', imageInherited: true,
+    runtime: { network: 'none', containerUid: 2200, containerGid: 2201 }, configGrants,
+    readOnlyDirs: [readonly], readWriteDirs: [workspace], readOnlyVolumes: ['state'] });
   expect(runs().at(-1)).toContain('test:v2');
   expect(runs().at(-1)).toContain('--userns=keep-id:uid=2200,gid=2201');
   expect(runs().at(-1)).toContain('state:/home/agent/state:ro,nocopy');
@@ -244,27 +268,29 @@ test("launch revalidates inherited configuration paths even for records without 
 }, 15_000);
 
 test("image scopes pin branches, respect override boundaries, or replace all overrides", async () => {
-  const { root, workspace, client, create, get, runs } = await setup();
+  const { root, workspace, client, create, get, runs, mutate } = await setup();
   const child = (await create(root.id, join(workspace, "child"), { readOnlyDirs: [workspace] })).result as AgentRecord;
   const leaf = (await create(child.id, join(workspace, "child/leaf"), { image: "override:v1", readOnlyDirs: [workspace] })).result as AgentRecord;
+  // A direct root change intentionally leaves its descendants frozen.
+  expect((await mutate("agent.modify", { agentId: root.id, settings: { extensions: { podman: { ...root.settings.extensions?.podman as object, image: "test:v2", imageInherited: false } } } })).status).toBe("completed");
   const change = async (image: string, imageScope: string) => {
     const current = await get(root.id);
     const result: any = await client.request("podman.modify", { agentId: root.id, expectedRevision: current.revision, imageScope, settings: { extensions: { podman: { ...current.settings.extensions?.podman as object, image } } } });
     expect(result.errors).toEqual([]);
   };
-  await change("test:v2", "node");
-  expect((await get(child.id)).settings.extensions?.podman).toMatchObject({ image: "test:v1" });
+  await change("test:v3", "node");
+  expect((await get(child.id)).settings.extensions?.podman).toMatchObject({ image: "test:v1", imageInherited: false });
   expect((await get(leaf.id)).settings.extensions?.podman).toMatchObject({ image: "override:v1" });
   // Clear the child override, then inherited scope restarts it but not the explicit leaf.
   await client.wait(await client.request<Operation>("agent.modify", { agentId: child.id, settings: { extensions: { podman: { image: null, readOnlyDirs: [workspace] } } } }));
   const leafGeneration = (await get(leaf.id)).generation;
   const childGeneration = (await get(child.id)).generation;
-  await change("test:v3", "inherited");
+  await change("test:v4", "inherited");
   expect((await get(child.id)).generation).not.toBe(childGeneration);
   expect((await get(leaf.id)).generation).toBe(leafGeneration);
-  await change("test:v4", "all");
-  expect((await get(leaf.id)).settings.extensions?.podman).toMatchObject({ image: null });
-  expect(runs().at(-1)).toContain("test:v4");
+  await change("test:v5", "all");
+  expect((await get(leaf.id)).settings.extensions?.podman).toMatchObject({ image: "test:v5", imageInherited: true });
+  expect(runs().at(-1)).toContain("test:v5");
 }, 15_000);
 
 test("stale generations lose relay access; launch refuses replaced mount paths", async () => {

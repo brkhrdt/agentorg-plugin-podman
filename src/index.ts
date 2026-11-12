@@ -26,7 +26,7 @@ export function imageDescendants(agentId: string, agents: Readonly<AgentRecord>[
   const result: Readonly<AgentRecord>[] = [];
   function visit(id: string) {
     for (const child of agents.filter(a => !a.removedAt && a.parentId === id)) {
-      if (scope === "inherited" && parseSettings(child.settings.extensions?.podman).image) continue;
+      if (scope === "inherited" && !parseSettings(child.settings.extensions?.podman).imageInherited) continue;
       result.push(child); visit(child.id);
     }
   }
@@ -87,7 +87,25 @@ export function createPodmanPlugin(options: PodmanPluginOptions = {}): ServerPlu
       cleanupJobs.set(key, work);
       return work;
     }
-    host.registerSettings({ namespace: "podman", validate: parseSettings, ui: { fields: [
+    host.registerSettings({ namespace: "podman", validate: parseSettings, migrate(settings, context) {
+      const extensions = settings.extensions as Record<string, unknown> | undefined;
+      const current = parseSettings(extensions?.podman);
+      if (current.executionEnvironment) return settings;
+      // Freeze every legacy agent's effective container selection before any root can switch environments.
+      const agent = context?.agent;
+      const agents = context?.agents;
+      const runtime = agent && agents ? effectiveRuntime(agent, agents) : undefined;
+      const configured = agent && agents ? configuredGrants(agent, agents) : undefined;
+      const container = {
+        ...current,
+        executionEnvironment: "container" as const,
+        image: agent && agents ? effectiveImage(agent, agents, config.defaultImage) : current.image ?? config.defaultImage,
+        imageInherited: !current.image,
+        runtime: runtime ?? { network: config.network, containerUid: config.containerUid, containerGid: config.containerGid, env: config.env },
+        configGrants: configured ?? { readOnlyDirs: [], readWriteDirs: [], readOnlyVolumes: [], readWriteVolumes: [] },
+      };
+      return { ...settings, extensions: { ...extensions, podman: container } };
+    }, ui: { fields: [
       { key: "readOnlyDirs", label: "Read-only grants", editor: "directories" },
       { key: "readWriteDirs", label: "Read/write grants", editor: "directories" },
       { key: "readOnlyVolumes", label: "Read-only volumes", editor: "list" },
@@ -98,7 +116,7 @@ export function createPodmanPlugin(options: PodmanPluginOptions = {}): ServerPlu
       // Legacy startup hint only; mutable defaults are authoritative in server settings.
       defaultImage: config.defaultImage,
       endpoints: { modify: "podman.modify", volumes: "podman.volumes", configureVolume: "podman.volume.configure", profiles: "podman.profiles", images: "podman.choices.images", defaults: "podman.defaults" }, imageScopes: ["node", "inherited", "all"],
-      readOnlyDirs: true, readWriteDirs: true, readOnlyVolumes: true, readWriteVolumes: true, isolatedContainers: true, modelDiscovery: false,
+      readOnlyDirs: true, readWriteDirs: true, readOnlyVolumes: true, readWriteVolumes: true, isolatedContainers: true, hostExecution: { rootsOnly: true, defaultForNewRoot: true }, modelDiscovery: false,
     });
     host.onInitialize(async () => {
       if (process.getuid?.() === 0) throw new Error("Podman plugin requires a non-root server user");
@@ -121,6 +139,13 @@ export function createPodmanPlugin(options: PodmanPluginOptions = {}): ServerPlu
       if (names.length) await command(["rm", "--force", "--ignore", ...names]);
     });
     async function normalized(settings: Settings, agent: Readonly<AgentRecord>, launch = false): Promise<Settings> {
+      const rawSelection = parseSettings(settings.extensions?.podman);
+      const explicitContainerIntent = !!(rawSelection.profile || rawSelection.runtime || rawSelection.image || rawSelection.configGrants || rawSelection.readOnlyDirs.length || rawSelection.readWriteDirs.length || rawSelection.readOnlyVolumes.length || rawSelection.readWriteVolumes.length);
+      const selection = rawSelection.executionEnvironment ? rawSelection : { ...rawSelection, executionEnvironment: agent.parentId === null && !explicitContainerIntent ? "host" as const : "container" as const };
+      if (selection.executionEnvironment === "host") {
+        if (agent.parentId !== null) throw new ApiError("FORBIDDEN", "Host execution is only available to root agents");
+        return { ...settings, extensions: { ...settings.extensions, podman: { executionEnvironment: "host" } } };
+      }
       const agents = await snapshot();
       const parent = agents.find(a => a.id === agent.parentId);
       const base = parent?.settings.cwd ?? process.cwd();
@@ -133,9 +158,25 @@ export function createPodmanPlugin(options: PodmanPluginOptions = {}): ServerPlu
         if (selected) value = { ...value, configGrants: grantDefaults(selected) };
       }
       // Use the proposed settings, not the agent's previous configuration snapshot.
-      const configured = value.configGrants ?? configuredGrants({ ...agent, settings }, agents);
+      const priorAssignment = parseSettings(agent.settings.extensions?.podman);
+      const hasPriorAssignment = priorAssignment.executionEnvironment === "container" && priorAssignment.image !== undefined && priorAssignment.runtime !== undefined && priorAssignment.configGrants !== undefined;
+      const configured = value.configGrants ?? (hasPriorAssignment ? priorAssignment.configGrants : configuredGrants({ ...agent, settings }, agents));
       const input = configured ? { ...value, configGrants: configured } : value;
-      value = await normalize(input, base);
+      // Materialize a complete assignment on new/reselected containers. Preserve a prior
+      // snapshot when a partial namespace replacement edits unrelated grants/settings.
+      const assigned = !launch ? { ...input,
+        image: input.image === null ? effectiveImage({ ...agent, settings }, agents, currentConfig().defaultImage) : input.image ?? (hasPriorAssignment ? priorAssignment.image : effectiveImage({ ...agent, settings }, agents, currentConfig().defaultImage)),
+        // Explicit provenance from a trusted scope operation (or profile editor) wins;
+        // otherwise a changed image/profile is a new local selection.
+        imageInherited: input.imageInherited ?? (input.image === null ? true : hasPriorAssignment && ((input.image !== undefined && input.image !== priorAssignment.image) || (input.profile !== undefined && !isDeepStrictEqual(input.profile, priorAssignment.profile))) ? false
+          : hasPriorAssignment ? priorAssignment.imageInherited : input.image === undefined),
+        runtime: input.runtime ?? (hasPriorAssignment ? priorAssignment.runtime : effectiveRuntime({ ...agent, settings }, agents)) ?? {
+          network: currentConfig().network, containerUid: currentConfig().containerUid, containerGid: currentConfig().containerGid, env: currentConfig().env,
+        },
+        profile: input.profile ?? (hasPriorAssignment ? priorAssignment.profile : undefined),
+        configGrants: input.configGrants ?? (hasPriorAssignment ? priorAssignment.configGrants : { readOnlyDirs: [], readWriteDirs: [], readOnlyVolumes: [], readWriteVolumes: [] }),
+      } : input;
+      value = await normalize({ ...assigned, executionEnvironment: "container" }, base);
       if (launch) {
         // Inherited paths need the same changed-symlink checks as local paths.
         if (cwd !== settings.cwd || !isDeepStrictEqual(value, input)) throw new ApiError("FORBIDDEN", "Persisted mount/cwd paths changed; update settings through a trusted client");
@@ -161,16 +202,27 @@ export function createPodmanPlugin(options: PodmanPluginOptions = {}): ServerPlu
       if (!parent) throw new ApiError("FORBIDDEN", "Agent filesystem grants require a direct parent");
       const next = parseSettings(context.agent.settings.extensions?.podman);
       const old = parseSettings(context.previous?.settings.extensions?.podman);
-      if (!isDeepStrictEqual(next.runtime, old.runtime) || !isDeepStrictEqual(next.profile, old.profile))
-        throw new ApiError("FORBIDDEN", "Only clients may choose container configurations or runtime settings");
-      if ((next.image ?? null) !== (old.image ?? null)) throw new ApiError("FORBIDDEN", "Only clients may change container images");
-      const inheritedConfig = configuredGrants(parent, context.agents);
+      if (next.executionEnvironment !== old.executionEnvironment && !(context.method === "agent.create" && next.executionEnvironment === "container")) throw new ApiError("FORBIDDEN", "Only clients may choose execution environment");
+      const requestedPodman = (context.settingsPatch?.extensions as Record<string, unknown> | undefined)?.podman;
+      const requested: ReturnType<typeof parseSettings> = requestedPodman === undefined ? parseSettings({}) : parseSettings(requestedPodman);
+      const materializedChild = context.method === "agent.create";
+      if (materializedChild) {
+        if (requested.profile || requested.runtime || requested.image || requested.imageInherited !== undefined || requested.executionEnvironment !== undefined)
+          throw new ApiError("FORBIDDEN", "Agents may not choose a child container configuration or execution environment");
+      } else {
+        if (!isDeepStrictEqual(next.runtime, old.runtime) || !isDeepStrictEqual(next.profile, old.profile) || next.imageInherited !== old.imageInherited)
+          throw new ApiError("FORBIDDEN", "Only clients may choose container configurations or runtime settings");
+        if ((next.image ?? null) !== (old.image ?? null)) throw new ApiError("FORBIDDEN", "Only clients may change container images");
+      }
+      const inheritedConfig = configuredGrants(parent, context.agents) ?? { readOnlyDirs: [], readWriteDirs: [], readOnlyVolumes: [], readWriteVolumes: [] };
       if (!isDeepStrictEqual(next.configGrants, old.configGrants) && !isDeepStrictEqual(next.configGrants, inheritedConfig))
         throw new ApiError("FORBIDDEN", "Agents may only inherit container configuration mounts from their parent");
       const callerGrants = parseSettings((await normalized(caller.settings, caller, true)).extensions?.podman);
       const parentGrants = parseSettings((await normalized(parent.settings, parent, true)).extensions?.podman);
-      requireDelegation(next, old, callerGrants, parentGrants);
-      requireVolumeDelegation(next, old, callerGrants, parentGrants);
+      const callerHost = parseSettings(caller.settings.extensions?.podman).executionEnvironment === "host";
+      const parentHost = parseSettings(parent.settings.extensions?.podman).executionEnvironment === "host";
+      requireDelegation(next, old, callerGrants, parentGrants, callerHost, parentHost);
+      requireVolumeDelegation(next, old, callerGrants, parentGrants, callerHost, parentHost);
       // Agents cannot revoke a grant while leaving a previously delegated child with greater rights.
       for (const child of context.agents.filter(a => !a.removedAt && a.parentId === context.agent.id)) {
         const grants = parseSettings(child.settings.extensions?.podman);
@@ -216,6 +268,7 @@ export function createPodmanPlugin(options: PodmanPluginOptions = {}): ServerPlu
       // One detached configuration snapshot spans all asynchronous launch hooks.
       const config = currentConfig();
       launchConfigs.set(context, config);
+      if (parseSettings(context.agent.settings.extensions?.podman).executionEnvironment === "host") return;
       for (const path of [context.socketPath, await canonicalFuturePath(context.socketPath)])
         if (!protectedPaths.includes(path)) protectedPaths.push(path);
       await normalized(context.agent.settings, context.agent, true);
@@ -233,6 +286,7 @@ export function createPodmanPlugin(options: PodmanPluginOptions = {}): ServerPlu
       await mkdir(join(host.dataDir, "sessions", agent.id, String(agent.sessionNumber)), { recursive: true, mode: 0o700 });
     });
     host.beforeLaunch(async (spec, context) => {
+      if (parseSettings(context.agent.settings.extensions?.podman).executionEnvironment === "host") return spec;
       const config = launchConfigs.get(context);
       const resource = resources.get(context.agent.generation!);
       if (!config || !resource || context.executionEnvironment !== "container") throw new Error("Missing container launch preparation");
@@ -280,6 +334,10 @@ export function createPodmanPlugin(options: PodmanPluginOptions = {}): ServerPlu
       return wrapped;
     });
     host.validateLaunch(async (spec, context) => {
+      if (parseSettings(context.agent.settings.extensions?.podman).executionEnvironment === "host") {
+        if (context.executionEnvironment === "container") throw new ApiError("FORBIDDEN", "Host assignment cannot launch as a container");
+        return;
+      }
       const expected = launches.get(context);
       if (!expected || spec.command !== expected.command || JSON.stringify(spec.args) !== JSON.stringify(expected.args) || spec.cwd !== expected.cwd || spec.inheritEnv !== false || typeof spec.gracefulStop !== "function")
         throw new ApiError("FORBIDDEN", "Every agent must launch through the final Podman wrapper; load podman after other launch-transforming plugins");
@@ -379,26 +437,34 @@ export function createPodmanPlugin(options: PodmanPluginOptions = {}): ServerPlu
         operations.push(op);
         if (op.status !== "completed") throw new Error(op.error?.message ?? `Mutation ${op.status}`);
       }
-      const oldImage = effectiveImage(agent, agents, fallbackImage);
+      const currentAssignment = parseSettings(agent.settings.extensions?.podman);
+      if (next.image !== currentAssignment.image || !isDeepStrictEqual(next.profile, currentAssignment.profile)) next.imageInherited = false;
       const proposed = { ...agent, settings: { ...agent.settings, extensions: { ...agent.settings.extensions, podman: next } } };
       const newImage = effectiveImage(proposed, agents, fallbackImage);
+      const environmentChanged = next.executionEnvironment !== parseSettings(agent.settings.extensions?.podman).executionEnvironment;
+      const oldImage = environmentChanged ? newImage : effectiveImage(agent, agents, fallbackImage);
       if (oldImage !== newImage && p.imageScope === "node") {
         // Pin direct inheriting children so their entire branches retain the old image.
-        for (const child of agents.filter(a => !a.removedAt && a.parentId === agent.id && !parseSettings(a.settings.extensions?.podman).image)) {
-          try { await mutate(child, { settings: { extensions: { podman: { ...parseSettings(child.settings.extensions?.podman), image: oldImage } } } }); }
+        for (const child of agents.filter(a => !a.removedAt && a.parentId === agent.id && parseSettings(a.settings.extensions?.podman).imageInherited)) {
+          try {
+            const childSettings = parseSettings(child.settings.extensions?.podman);
+            const childImage = effectiveImage(child, agents, fallbackImage);
+            await mutate(child, { settings: { extensions: { podman: { ...childSettings, image: childImage, imageInherited: false } } } });
+          }
           catch (error: any) { errors.push({ agentId: child.id, message: error.message }); }
         }
         if (errors.length) return { operations, errors };
       }
-      try { await mutate(agent, { settings: p.settings, ...(p.name !== undefined && { name: p.name }), ...(p.metadata !== undefined && { metadata: p.metadata }) }); }
+      try { await mutate(agent, { settings: { ...p.settings, extensions: { ...(p.settings.extensions as Record<string, unknown>), podman: next } }, ...(p.name !== undefined && { name: p.name }), ...(p.metadata !== undefined && { metadata: p.metadata }) }); }
       catch (error: any) { errors.push({ agentId: agent.id, message: error.message }); return { operations, errors }; }
-      if (oldImage !== newImage || p.imageScope === "all") {
+      if (!environmentChanged && (oldImage !== newImage || p.imageScope === "all")) {
         for (const child of imageDescendants(agent.id, agents, p.imageScope)) {
           const grants = parseSettings(child.settings.extensions?.podman);
           try {
-            if (grants.image) {
-              // Clear an explicit override for the "all" scope; modify restarts active agents.
-              await mutate(child, { settings: { extensions: { podman: { ...grants, image: null } } } });
+            if (grants.image && !grants.imageInherited && p.imageScope === "inherited") continue;
+            if (grants.imageInherited || p.imageScope === "all") {
+              // Snapshot the propagated image so later ancestor changes do not silently relocate this agent.
+              await mutate(child, { settings: { extensions: { podman: { ...grants, image: newImage, imageInherited: true } } } });
             } else if (["idle", "busy", "starting"].includes(child.state)) {
               const current = await host.request("agent.get", { agentId: child.id }, serverCaller) as AgentRecord;
               if (current.revision !== child.revision) throw new Error("Stale descendant revision");
