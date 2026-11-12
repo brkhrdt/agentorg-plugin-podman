@@ -31,6 +31,13 @@ test('settings reject invalid names, duplicates and RO/RW conflicts', () => {
   expect(() => requireVolumeDelegation(parseSettings({ readOnlyVolumes: ['pi-other'] }), parseSettings({}), parseSettings({ readWriteVolumes: ['pi'] }), parseSettings({ readWriteVolumes: ['pi'] }))).toThrow('Cannot delegate');
 });
 
+test('Host authority may delegate eligible named-volume grants, while container authorities remain bounded', () => {
+  const requested = parseSettings({ readWriteVolumes: ['pi'] });
+  const empty = parseSettings({});
+  expect(() => requireVolumeDelegation(requested, empty, empty, empty)).toThrow('Cannot delegate');
+  expect(() => requireVolumeDelegation(requested, empty, empty, empty, true, true)).not.toThrow();
+});
+
 test('trusted destinations reject runtime paths and mount syntax', () => {
   for (const destination of ['/', '/proc/config', '/usr/local', '/run/x', 'relative', '/home/pi/../pi/.pi', '/home/pi/.pi/', '/home/pi/.pi,ro=false'])
     expect(() => new Volumes(volumeConfigSchema.parse({ pi: { destination } }), async () => '')).toThrow();

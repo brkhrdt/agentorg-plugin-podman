@@ -1,8 +1,11 @@
 # @agentorg/plugin-podman
 
-Run **every agent in its own rootless Podman container**. Children inherit their
-nearest ancestor's image, not its container or filesystem grants. Grants default
-to empty. There is no host-harness fallback if container startup fails.
+Root agents may run natively on the server host or in a rootless Podman container;
+new roots default to Host when the client supports this capability. Host runs as
+the server OS user with full access to that user's files and processes. Subagents
+always run in containers, even when their root runs on Host. Existing agents keep
+their assigned environment and container configuration. Podman is still required
+at server startup; Host is not a fallback if container startup or Podman fails.
 
 ## Example Pi image
 
@@ -65,7 +68,9 @@ Use `settings.extensions.podman`:
 Send this as `agent.create.params.settings`. Modify with `agent.modify` and a
 complete `settings.extensions.podman` value. Supplying that namespace **replaces**
 it; other plugin namespaces are preserved. `image: null` (or omission) inherits
-from the nearest explicit ancestor, falling back to the configured default.
+from the nearest explicit ancestor (or current server default), then snapshots that
+value locally. Subsequent ancestor/default changes do not affect the assigned agent
+until it is explicitly reselected or changed through `podman.modify`.
 
 * `cwd` must be explicit, existing, and covered by a grant. Read-only cwd is valid.
 * All granted directories must already exist. Create subdirectories through
@@ -135,9 +140,12 @@ bounds records, outstanding requests, connections, and output buffering.
 
 The TUI discovers `capabilities.plugins.podman` and adds a **Container** selector
 when configurations are available, plus `readOnlyDirs`, `readWriteDirs`,
-`readOnlyVolumes` and `readWriteVolumes` editor fields. Root drafts select
-**Default**; child drafts inherit their parent's image/runtime and configured
-mounts unless another container is selected. Extra per-agent grants do not inherit.
+`readOnlyVolumes` and `readWriteVolumes` editor fields. New root drafts default to
+**Host** when the server advertises Host support; otherwise they select **Default**.
+Child drafts start from their parent's currently assigned image/runtime
+and configured mounts unless another container is selected. The resulting assignment
+is stored locally, so later ancestor environment/configuration changes do not silently
+retarget existing descendants. Extra per-agent grants do not inherit.
 Volumes use the same add/edit/remove list workflow, with server-discovered choices:
 text fuzzy-filters names, ↑/↓ selects, Tab completes, Enter stages and Escape cancels.
 Destinations/descriptions are displayed, never host storage paths. Discovery failures
@@ -182,10 +190,24 @@ This client-only endpoint also accepts `name` and `metadata` and returns
 `{operations, errors}` after the individual operations finish. Updates are
 revision-fenced, but multi-node orchestration is **not atomic**. Errors report
 partial completion; clients must refresh and must not blindly retry. Stopped or
-failed descendants remain stopped/failed. "Node only" may restart active direct
-children while pinning their image; their descendants keep their old effective
-image. Raw `agent.modify` does not offer propagation scopes: inherited descendants
-observe a changed ancestor image on their next explicit restart.
+failed descendants remain stopped/failed. "Node only" pins directly inherited
+children to the old image; their descendants keep their old frozen assignment.
+Container assignments are locally snapshotted. Raw `agent.modify` does not propagate
+or retarget descendants; use this client-only endpoint for explicit image scopes.
+
+## Execution environments
+
+A trusted client may select Host only for a root agent. Host uses the core native
+launch path and the server user's full host access; it does not receive Podman
+mount restrictions. Never select Host for an untrusted workload. Agents cannot
+change their own environment, and children cannot select Host. A child created
+under a Host root still runs in a container and requires explicit cwd grants.
+
+Changing a root from Host to a container (or back) changes only that root; existing
+children retain their container assignments. Newly created or reselected containers
+use current configuration and volume snapshots. The server itself must be on the
+actual host to provide actual-host access; running the server inside another
+container does not escape that outer container.
 
 ## Named container configurations
 
@@ -280,7 +302,7 @@ or edit the settings API, and no settings MCP tool is provided.
 
 | Setting | Effect |
 | --- | --- |
-| `defaultImage` | Future launches/restarts without an explicit ancestor image |
+| `defaultImage` | Newly assigned containers without an explicit image; existing assignments remain frozen |
 | `network` (`pasta`, `slirp4netns`, `none`) | Future launches |
 | `containerUid`, `containerGid` (integers 1–65535) | Future launches |
 | `env` (unique variable **names**, not values) | Future launches |
