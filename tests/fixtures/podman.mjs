@@ -7,7 +7,7 @@ const args = process.argv.slice(2);
 if (process.env.FAKE_PODMAN_LOG) appendFileSync(process.env.FAKE_PODMAN_LOG, JSON.stringify(args) + "\n");
 if (args[0] === "info") { console.log(JSON.stringify({ host: { security: { rootless: true } }, store: {} })); process.exit(0); }
 const images = process.env.FAKE_PODMAN_IMAGES ? JSON.parse(readFileSync(process.env.FAKE_PODMAN_IMAGES, 'utf8')) : {
-  'test:v1': 'a'.repeat(64), 'test:v2': 'b'.repeat(64), 'test:v3': 'd'.repeat(64), 'test:v4': 'e'.repeat(64),
+  'test:v1': 'a'.repeat(64), 'test:v2': 'b'.repeat(64), 'test:v3': 'd'.repeat(64), 'test:v4': 'e'.repeat(64), 'test:v5': '8'.repeat(64),
   'explicit:v1': 'f'.repeat(64), 'custom:v3': '1'.repeat(64), 'override:v1': '2'.repeat(64),
   'root:v1': '3'.repeat(64), 'child:v1': '4'.repeat(64), 'fallback:v1': '5'.repeat(64),
   'operator:v3': '6'.repeat(64), 'operator:v4': '7'.repeat(64), 'localhost/agentorg-pi:latest': 'c'.repeat(64),

@@ -36,7 +36,7 @@ async function setup(extra: ServerPlugin[] = [], volumes: PodmanPluginOptions['v
     host.registerHarness({ name: "fixture", launch: ({ agent, executionEnvironment, mcpServers }) => {
       expect(executionEnvironment).toBe((agent.settings.extensions?.podman as { executionEnvironment?: string } | undefined)?.executionEnvironment === "host" ? undefined : "container");
       expect(mcpServers.map(spec => spec.name)).toEqual(["agentorg"]);
-      if (executionEnvironment === undefined) return { command: process.execPath, args: ["--import", tsxImport, join(import.meta.dirname, "fixtures/agent.ts")], cwd: agent.settings.cwd };
+      if (executionEnvironment === undefined) return { command: process.execPath, args: ["--import", tsxImport, join(import.meta.dirname, "fixtures/host-agent.ts")], cwd: agent.settings.cwd };
       return { command: "fixture", args: [], cwd: agent.settings.cwd, env: { HOST_SECRET: "never-pass", ORG_PI_CONFIG: "fixture-config" }, ...(consumesEnv.length && { consumesEnv }) };
     } });
   } };
@@ -101,7 +101,8 @@ test("Host roots use native launch and their agent-created children remain froze
   const switched = await mutate("agent.modify", { agentId: root.id, settings: { extensions: { podman: { executionEnvironment: "host" } } } });
   expect(switched.status).toBe("completed");
   expect(runs()).toHaveLength(before); // No Podman relaunch for Host.
-  expect((switched.result as AgentRecord).settings.extensions?.podman).toEqual({ executionEnvironment: "host" });
+  expect((switched.result as AgentRecord).settings.extensions?.podman).toEqual({ executionEnvironment: "host",
+    readOnlyDirs: [], readWriteDirs: [], readOnlyVolumes: [], readWriteVolumes: [] });
   const created = await client.wait(await server.organization.request("agent.create", {
     parentId: root.id, settings: { harness: "fixture", cwd: workspace, extensions: { podman: { readWriteDirs: [workspace] } } },
   }, { kind: "agent", id: root.id }) as Operation);
@@ -246,9 +247,14 @@ test("configured mounts inherit through agent-created descendants without inheri
 test("launch revalidates inherited configuration paths even for records without a local snapshot", async () => {
   // Simulate legacy persisted children: only their own cwd grant is stored.
   const legacy: ServerPlugin = { apiVersion: 1, name: 'legacy-child-settings', setup(host) {
-    host.beforeSettings((settings, agent) => agent.parentId ? { ...settings, extensions: { ...settings.extensions,
-      podman: { readWriteDirs: [settings.cwd!] },
-    } } : settings);
+    host.beforeSettings((settings, agent) => {
+      if (!agent.parentId) return settings;
+      const extensions = settings.extensions as Record<string, unknown> | undefined;
+      const podman = extensions?.podman as Record<string, unknown> | undefined;
+      // Simulate a pre-snapshot child while retaining the canonical runtime assignment.
+      const { configGrants: _removed, ...legacy } = podman ?? {};
+      return { ...settings, extensions: { ...extensions, podman: { ...legacy, readWriteDirs: [settings.cwd!] } } };
+    });
   } };
   const { dir, workspace, root, create, mutate } = await setup([legacy]);
   const outside = join(dir, 'outside');
